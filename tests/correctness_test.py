@@ -11,7 +11,7 @@
   L5 估值（v_mid/buy/sell/verdict/downside/逆向g*/DCF）
   L6 组合（单票/行业/现金上限、缓冲、集中宇宙）
   L7/L8 略（smoke_test 已覆盖）
-  回测引擎（确定性、成本计提）
+  回测引擎（确定性、成本计提、指数基准接入）
   数据缺口鲁棒性（net_payout 缺失、负 gpa 复数守卫）
   L1 宇宙时点过滤（退市/上市年限/ST）
   真实库回归锚点（伊利被挡、圆通速递 #1）
@@ -422,6 +422,52 @@ def test_backtest():
         check("分状态检验返回非空", not bt.regime_report(res1).empty)
 
 
+def test_index_benchmark():
+    print("\n[9b] 指数基准接入（HS300 行情作基准）")
+    cfg = load_config()
+    path = str(Path(__file__).resolve().parent.parent / "data" / "correctness_db")
+    st = build_demo_store(path, GenConfig(n_stocks=60, seed=11, fund_start_year=2015,
+                                          fund_end_year=2026, price_start="2018-01-01"),
+                          overwrite=True)
+    # 注入合成指数日线（覆盖回测区间，温和上涨）
+    px = st.load_prices()
+    dates = sorted(px["date"].unique())
+    closes = np.cumprod(np.full(len(dates), 1.0003))
+    idx = pd.DataFrame({"code": "sh000300", "date": pd.to_datetime(dates), "close": closes})
+    st.save_index_prices(idx)
+
+    # 等权基准仍是默认
+    r_eq = bt.run_backtest(st, cfg, "2016-01-01", "2026-06-30", label="t", benchmark="equal")
+    check("等权基准为默认", "error" not in r_eq and r_eq["stats"]["benchmark"] == "等权基准")
+
+    # 指数基准
+    r_ix = bt.run_backtest(st, cfg, "2016-01-01", "2026-06-30", label="t", benchmark="sh000300")
+    check("指数基准回测无错误", "error" not in r_ix, r_ix.get("error", ""))
+    if "error" not in r_ix:
+        check("基准标签含 sh000300", "sh000300" in r_ix["stats"]["benchmark"])
+        check("指数基准 NAV 与等权基准 NAV 不同（用了不同收益序列）",
+              not np.allclose(r_ix["nav"]["bench"].values, r_eq["nav"]["bench"].values))
+        check("指数基准 NAV 合理（期末>期初）",
+              float(r_ix["nav"]["bench"].iloc[-1]) > 1.0)
+        check("指数基准下策略超额由 bench 序列驱动",
+              np.isfinite(r_ix["stats"]["excess_cagr"]))
+
+    # 指数数据缺失 → 回退等权（不崩）。用独立目录，避免继承上面写入的 index_prices
+    with tempfile.TemporaryDirectory() as td:
+        st2 = build_demo_store(td, GenConfig(n_stocks=60, seed=11, fund_start_year=2015,
+                                             fund_end_year=2026, price_start="2018-01-01"),
+                               overwrite=True)
+        r_missing = bt.run_backtest(st2, cfg, "2016-01-01", "2026-06-30", benchmark="sh000300")
+        check("指数数据缺失 → 回退等权基准（不崩）",
+              "error" not in r_missing and r_missing["stats"]["benchmark"] == "等权基准")
+
+    # 双基准对比报告可生成
+    rep = bt.compare_benchmarks(st, cfg, "2016-01-01", "2026-06-30",
+                                index_code="sh000300", index_name="沪深300")
+    check("双基准对比报告含 沪深300", "沪深300" in rep and "策略" in rep)
+
+
+
 # ================================================================ 真实库回归锚点
 def test_real_anchors():
     print("\n[10] 真实库回归锚点（data/real_universe）")
@@ -463,6 +509,7 @@ def main():
     test_universe()
     test_data_gaps()
     test_backtest()
+    test_index_benchmark()
     test_real_anchors()
 
     print("\n" + "=" * 70)

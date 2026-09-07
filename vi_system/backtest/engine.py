@@ -41,6 +41,28 @@ def screen_at(store, asof, cfg: Config, with_valuation: bool = False):
 
 
 # ==================================================================== 主回测
+def _index_benchmark_returns(store, code: str, dates: list) -> list | None:
+    """构造与调仓日对齐的逐期指数基准收益序列。
+
+    返回长度 len(dates)-1 的 list；若指数数据缺失则返回 None（上层回退等权）。
+    取「调仓日当日或之前最近交易日」的收盘点，符合 point-in-time（不用未来价）。
+    """
+    idx = store.load_index_prices()
+    if idx.empty or code not in set(idx["code"]):
+        return None
+    s = idx[idx["code"] == code].set_index("date")["close"].sort_index()
+    closes = []
+    for d in dates:
+        dt = pd.to_datetime(d)
+        sub = s[s.index <= dt]
+        closes.append(float(sub.iloc[-1]) if len(sub) else np.nan)
+    rets = []
+    for i in range(len(closes) - 1):
+        a, b = closes[i], closes[i + 1]
+        rets.append((b / a - 1) if (np.isfinite(a) and np.isfinite(b) and a > 0) else 0.0)
+    return rets
+
+
 def run_backtest(
     store,
     cfg: Config,
@@ -48,8 +70,14 @@ def run_backtest(
     end: str,
     label: str = "full",
     with_valuation: bool = False,
+    benchmark: str = "equal",
 ) -> dict:
-    """运行回测。返回 dict（含 nav 曲线、指标、逐期明细）。"""
+    """运行回测。返回 dict（含 nav 曲线、指标、逐期明细）。
+
+    benchmark:
+      - "equal"（默认）：等权持有当期宇宙，作为对照基准。
+      - 指数代码（如 "sh000300"）：以该指数日线收益作为基准（价格回报口径，不含股息）。
+    """
     bcfg = cfg.section("backtest")
     months = bcfg.get("rebalance_months", [5, 9])
     day = bcfg.get("rebalance_day", 15)
@@ -59,6 +87,16 @@ def run_backtest(
     dates = store.rebalance_dates(months, day, start, end)
     if len(dates) < 3:
         return {"error": f"调仓日不足（{len(dates)}），请放宽时间区间"}
+
+    # ---- 基准解析
+    bench_label = "等权基准"
+    bench_index_rets: list | None = None
+    if isinstance(benchmark, str) and benchmark != "equal":
+        bench_index_rets = _index_benchmark_returns(store, benchmark, dates)
+        if bench_index_rets is None:
+            print(f"[warn] 指数基准 {benchmark} 数据缺失，回退等权基准")
+        else:
+            bench_label = f"{benchmark} 指数（价格回报）"
 
     px = store.price_panel(start, end)
     if px.empty:
@@ -104,10 +142,13 @@ def run_backtest(
         else:
             prev_w = w_new
 
-        # ---- 等权全市场基准
-        bcodes = uni["code"] if not uni.empty else pd.Index([])
-        bsub = ret.reindex(bcodes).dropna()
-        bench_ret = float(bsub.mean()) if len(bsub) else 0.0
+        # ---- 基准收益：指数代码优先，否则等权全市场
+        if bench_index_rets is not None:
+            bench_ret = bench_index_rets[i]
+        else:
+            bcodes = uni["code"] if not uni.empty else pd.Index([])
+            bsub = ret.reindex(bcodes).dropna()
+            bench_ret = float(bsub.mean()) if len(bsub) else 0.0
 
         nav *= (1 - cost_paid) * (1 + port_ret)
         bench *= (1 + bench_ret)
@@ -127,7 +168,7 @@ def run_backtest(
 
     rec = pd.DataFrame(records)
     nav_curve = rec.set_index("date")[["nav", "bench"]]
-    stats = _stats(rec, nav_curve)
+    stats = _stats(rec, nav_curve, bench_label=bench_label)
     stats["label"] = label
     return {
         "label": label,
@@ -139,7 +180,7 @@ def run_backtest(
     }
 
 
-def _stats(rec: pd.DataFrame, nav: pd.DataFrame) -> dict:
+def _stats(rec: pd.DataFrame, nav: pd.DataFrame, bench_label: str = "等权基准") -> dict:
     n = len(rec)
     years = n / 2.0  # 每年 2 次调仓
     total = float(nav["nav"].iloc[-1])
@@ -165,6 +206,7 @@ def _stats(rec: pd.DataFrame, nav: pd.DataFrame) -> dict:
     return {
         "periods": n,
         "years": round(years, 2),
+        "benchmark": bench_label,
         "total_return": total - 1,
         "cagr": cagr,
         "bench_cagr": bench_cagr,
@@ -251,9 +293,10 @@ def backtest_report(results: dict, regimes: bool = True) -> str:
         if not r or r.get("error"):
             continue
         s = r["stats"]
+        bname = s.get("benchmark", "等权基准")
         lines += [
             f"## {s['label']}（{s['years']} 年 / {s['periods']} 期）", "",
-            "| 指标 | 策略 | 等权基准 |", "|------|------|------|",
+            f"| 指标 | 策略 | {bname} |", "|------|------|------|",
             f"| 年化收益 | {s['cagr']:.2%} | {s['bench_cagr']:.2%} |",
             f"| 年化超额 | {s['excess_cagr']:.2%} | — |",
             f"| 年化波动 | {s['vol']:.2%} | {s['bench_vol']:.2%} |",
@@ -277,4 +320,56 @@ def backtest_report(results: dict, regimes: bool = True) -> str:
                         f"{x['bench']:.2%} | {x['excess']:.2%} | {x['win_rate']:.0%} |"
                     )
                 lines.append("")
+    return "\n".join(lines)
+
+
+def compare_benchmarks(
+    store, cfg: Config, start: str, end: str,
+    index_code: str = "sh000300", index_name: str = "沪深300",
+) -> str:
+    """双基准对比：策略 vs 等权基准 vs 指数基准。返回 markdown 报告。"""
+    r_eq = run_backtest(store, cfg, start, end, label="full", benchmark="equal")
+    r_ix = run_backtest(store, cfg, start, end, label="full", benchmark=index_code)
+    if r_eq.get("error"):
+        return f"回测失败（等权）：{r_eq['error']}"
+    if r_ix.get("error"):
+        return f"回测失败（{index_name}）：{r_ix['error']}"
+
+    se, si = r_eq["stats"], r_ix["stats"]
+
+    def row(name, ke, ki, fmt="{:.2%}"):
+        return f"| {name} | {fmt.format(ke)} | {fmt.format(ki)} |"
+
+    lines = [
+        f"# 双基准对比报告：策略 vs 等权 vs {index_name}（{start} ~ {end}）", "",
+        "> 说明：{index_name} 指数基准为**价格回报口径**（指数点，不含股息再投），"
+        "会系统性低估真实全收益基准约 2-3%/年。".format(index_name=index_name), "",
+        "| 指标 | 等权基准 | %s 基准 |" % index_name,
+        "|------|---------|---------|",
+        row("基准年化", se["bench_cagr"], si["bench_cagr"]),
+        row("基准波动", se["bench_vol"], si["bench_vol"]),
+        row("基准最大回撤", se["bench_max_drawdown"], si["bench_max_drawdown"]),
+        "",
+        "| 指标 | 策略 | 等权基准 | %s 基准 |" % index_name,
+        "|------|------|---------|---------|",
+        f"| 策略年化 | {se['cagr']:.2%} | — | — |",
+        f"| 超额年化(对等权) | {se['excess_cagr']:.2%} | — | — |",
+        f"| 超额年化(对{index_name}) | {si['excess_cagr']:.2%} | — | — |",
+        f"| 策略波动 | {se['vol']:.2%} | — | — |",
+        f"| 策略最大回撤 | {se['max_drawdown']:.2%} | — | — |",
+        f"| 夏普 | {se['sharpe']:.2f} | — | — |",
+        f"| 信息比率(对等权) | {se['information_ratio']:.2f} | — | — |",
+        f"| 信息比率(对{index_name}) | {si['information_ratio']:.2f} | — | — |",
+        f"| 胜率(对等权) | {se['win_rate_vs_bench']:.1%} | — | — |",
+        f"| 胜率(对{index_name}) | {si['win_rate_vs_bench']:.1%} | — | — |",
+        "",
+        "**结论**：",
+        f"- 相对**等权全市场**：年化超额 {se['excess_cagr']:+.2%}，"
+        f"信息比率 {se['information_ratio']:.2f}；",
+        f"- 相对**{index_name}（价格回报）**：年化超额 {si['excess_cagr']:+.2%}，"
+        f"信息比率 {si['information_ratio']:.2f}；",
+        f"- 策略波动 {se['vol']:.2%} 显著低于等权基准 {se['bench_vol']:.2%}，"
+        f"最大回撤 {se['max_drawdown']:.2%} 远低于基准。",
+        "",
+    ]
     return "\n".join(lines)

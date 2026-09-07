@@ -2,7 +2,8 @@
 #   tests/fetch_real.py      重新抓取真实数据（财务 + 行情）
 #   tests/build_universe.py  重建宇宙代码表
 #   python -m vi_system.cli demo   生成合成库
-data/
+# 注意：用 /data/ 锚定到仓库根，避免误伤 vi_system/data/ 源码模块
+/data/
 
 # 运行时日志
 out/*.log

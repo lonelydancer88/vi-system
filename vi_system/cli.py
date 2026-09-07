@@ -164,6 +164,34 @@ def cmd_backtest(args):
         print(bt.backtest_report({"full": r}))
         _write(bt.backtest_report({"full": r}), Path(args.out), "backtest.md")
 
+    # 指数基准对比（如 --benchmark sh000300）
+    if args.benchmark:
+        idx_name = {"sh000300": "沪深300", "sz399905": "中证500"}.get(
+            args.benchmark, args.benchmark)
+        try:
+            rep = bt.compare_benchmarks(
+                st, cfg, args.start, args.end,
+                index_code=args.benchmark, index_name=idx_name)
+            print("\n" + rep)
+            _write(rep, Path(args.out), "backtest-hs300.md")
+        except Exception as e:
+            print("[warn] 指数基准对比失败：", e)
+
+
+def cmd_fetch_index(args):
+    """抓取并存储指数日线（如沪深300 sh000300），供回测作基准。"""
+    from .data.westock import WeStockFetcher
+    st = _store(args.db)
+    f = WeStockFetcher()
+    print(f"抓取指数 {args.code} 行情 {args.start} ~ {args.end} ...")
+    df = f.index_prices(args.code, args.start, args.end)
+    if df.empty:
+        print("未获取到数据（检查代码格式：指数需带市场前缀，如 sh000300）")
+        return
+    st.save_index_prices(df)
+    print(f"已存储 {len(df)} 行 → {st.index_path}")
+    print(df.head(3).to_string(index=False))
+
 
 def cmd_sensitivity(args):
     cfg = _cfg(args.config)
@@ -247,8 +275,16 @@ def main(argv=None):
     b.add_argument("--start", default="2013-01-01")
     b.add_argument("--end", default="2026-12-31")
     b.add_argument("--label", default="full")
+    b.add_argument("--benchmark", default=None,
+                   help="指数基准代码（如 sh000300），生成双基准对比报告")
     b.add_argument("--out", default=str(DEFAULT_OUT))
     b.set_defaults(func=cmd_backtest)
+
+    fi = sub.add_parser("fetch-index", help="抓取并存储指数日线（如沪深300 sh000300）")
+    fi.add_argument("--code", default="sh000300", help="指数代码，需带市场前缀")
+    fi.add_argument("--start", default="2013-01-01")
+    fi.add_argument("--end", default="2026-12-31")
+    fi.set_defaults(func=cmd_fetch_index)
 
     sn = sub.add_parser("sensitivity", help="参数敏感性检验")
     sn.add_argument("--start", default="2013-01-01")
