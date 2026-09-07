@@ -1,0 +1,182 @@
+# ============================================================
+# 价值投资选股系统 —— 规则配置
+# 所有阈值与权重集中于此，带版本号与生效日期。
+# 改参数必须新增版本（version + effective_date），禁止原地修改。
+# ============================================================
+
+version: "1.1"
+effective_date: "2026-09-07"
+note: "v1.0 初始占位值。v1.1 修正重资产行业排雷误杀：对公用事业/房地产/建筑装饰/交通运输/钢铁/环保豁免 leverage+altman_z（低Z高负债为商业模式而非破产信号）；share_dilution_5y 上限 0.20→0.50（原阈值把正常股本增长也误判为稀释）。属修 bug 级缺口，非收益优化。"
+
+# ------------------------------------------------------------
+# L1 宇宙层
+# ------------------------------------------------------------
+universe:
+  min_listing_years: 3
+  min_avg_amount_60d: 50000000      # 近60交易日日均成交额下限（元）
+  exclude_name_patterns: ["ST", "*ST", "退市", "退"]
+  exclude_boards: ["BJ"]            # 北交所代码前缀，默认剔除
+  include_delisted: true            # 回测必须含退市股（防幸存者偏差）
+
+# ------------------------------------------------------------
+# L3 排雷层（一票否决）
+# ------------------------------------------------------------
+vetoes:
+  enabled: true
+  rules:
+    beneish_m_score:
+      enabled: true
+      max: -1.78                    # > 此值视为存在操纵嫌疑
+    altman_z_score:
+      enabled: true
+      min: 1.8                      # < 此值视为破产风险区
+      # 重资产/资本密集行业低 Z 是商业模式（非破产信号），与金融同处理
+      skip_industries: ["银行", "保险", "证券", "多元金融", "公用事业", "房地产", "建筑装饰", "交通运输", "钢铁", "环保"]
+    audit_opinion:
+      enabled: true
+      years: 3                      # 近3年出现非标意见即否决
+    pledge_ratio:
+      enabled: true
+      max: 0.50                     # 大股东质押比例上限
+    goodwill_to_equity:
+      enabled: true
+      max: 0.30
+    ocf_to_ni_5y:
+      enabled: true
+      min: 0.60                     # 5年经营现金流/净利润均值下限
+    share_dilution_5y:
+      enabled: true
+      max: 0.50                     # 5年股本膨胀上限（放宽：原0.20把送转/可转债转股等正常股本增长也误判为稀释）
+    leverage:
+      enabled: true
+      net_debt_to_ebitda_max: 5.0
+      interest_coverage_min: 2.0
+      # 重资产/资本密集行业高负债为常态（受监管、现金流稳定），净负债/EBITDA 阈值对其系统性误杀
+      skip_industries: ["银行", "保险", "证券", "多元金融", "公用事业", "房地产", "建筑装饰", "交通运输", "钢铁", "环保"]
+
+  # 行业特化规则（覆盖上面的通用规则）
+  industry_overrides:
+    银行:
+      skip: ["altman_z_score", "leverage", "goodwill_to_equity"]
+      extra:
+        npl_ratio_max: 0.03             # 不良率
+        provision_coverage_min: 1.50    # 拨备覆盖率
+        cet1_min: 0.085                 # 核心一级资本充足率
+    保险:
+      skip: ["altman_z_score", "leverage"]
+    证券:
+      skip: ["altman_z_score", "leverage"]
+    多元金融:
+      skip: ["altman_z_score", "leverage"]
+    房地产:
+      extra:
+        cash_to_short_debt_min: 1.0     # 现金/短期债务
+
+# ------------------------------------------------------------
+# L4 因子层（三支柱）
+# ------------------------------------------------------------
+factors:
+  industry_level: sw2               # 行业内标准化粒度
+  winsorize: 3.0                    # z-score 截断
+  median_window_years: 5            # 先取N年中位数再打分
+  min_industry_size: 5              # 行业内样本不足则不打分（标 NaN）
+  percentile_floor: 30              # 三支柱各自最低分位门槛（AND 门）
+
+  weights:
+    value: 0.4
+    quality: 0.4
+    safety: 0.2
+
+  value_metrics:                    # 越高越便宜
+    ep: 1.0
+    bp: 1.0
+    cfp: 1.0
+    ebit_ev: 1.0
+    dividend_yield: 1.0
+  quality_metrics:                  # 越高越好（括号内为方向）
+    gpa: 1.0
+    roic: 1.0
+    accruals: -1.0                  # 越低越好
+    profit_growth_5y: 1.0
+    net_payout: 1.0
+  safety_metrics:                   # 越高越好
+    interest_coverage: 1.0
+    net_debt_ebitda: -1.0           # 越低越好
+    earnings_volatility: -1.0
+    revenue_volatility: -1.0
+
+  # A股特化：52周新低偏好（动量在A股是反转因子）。权重极低，仅观察性验证。
+  reversal_tilt:
+    enabled: false
+    weight: 0.05
+
+# ------------------------------------------------------------
+# L5 估值层
+# ------------------------------------------------------------
+valuation:
+  discount_rate: 0.10               # 基准折现率
+  terminal_growth_cap: 0.03         # 永续增长率上限
+  forecast_years: 5
+  buy_discount: 0.70                # 买点 = 中枢 × 0.70
+  sell_multiple: 1.50               # 卖点 = 中枢 × 1.50
+  max_downside_bear: 0.25           # 悲观情景最大可容忍下行空间
+  scenarios:
+    bull:   {growth: 0.15, terminal: 0.04, discount: 0.09}
+    base:   {growth: 0.08, terminal: 0.03, discount: 0.10}
+    bear:   {growth: 0.02, terminal: 0.01, discount: 0.12}
+
+# ------------------------------------------------------------
+# L6 组合层
+# ------------------------------------------------------------
+portfolio:
+  target_size: [20, 30]
+  max_position: 0.08
+  max_industry: 0.25
+  rebalance: quarterly
+  # 缓冲区用「目标持股数的倍数」而非百分比 —— 百分位会随候选池大小漂移，
+  # 导致"持股 27 只却只保留前 20 名"的永久换手。
+  buffer:
+    sell_rank_mult: 1.5   # 排名跌出 1.5×目标持股数才卖
+    buy_rank_mult: 1.0    # 排名进入 1.0×目标持股数才买
+  min_cash: 0.10
+  liquidity_floor_amount: 20000000  # 单票最低日均成交额
+
+# ------------------------------------------------------------
+# L7 监控层
+# ------------------------------------------------------------
+monitor:
+  thesis_alerts:
+    ocf_to_ni_min: 0.50
+    ocf_to_ni_consecutive_periods: 2
+    beneish_m_score_max: -1.78
+    pledge_ratio_jump: 0.15         # 质押率单期跳升幅度
+    altman_z_score_min: 1.8
+  crowding:
+    turnover_percentile_low: 30     # 换手率分位跌破此值 → 短期资金异动
+    dispersion_percentile_low: 20   # 估值离散度压缩至此分位 → 趋同风险
+    lookback_days: 250
+
+# ------------------------------------------------------------
+# 回测
+# ------------------------------------------------------------
+backtest:
+  rebalance_months: [5, 9]          # 年报(4月底)/半年报(8月底)披露后调仓，防前视
+  rebalance_day: 15
+  cost_per_side: 0.005              # 单边佣金+印花税+滑点
+  in_sample:  ["2010-01-01", "2018-12-31"]
+  out_of_sample: ["2019-01-01", "2026-12-31"]
+  benchmark: "equal_weight_universe"   # 真实基准(中证红利质量/低波)需外部数据
+  sensitivity:
+    perturb: 0.20                   # 核心参数 ±20% 扰动检验
+    params: ["factors.weights.value", "factors.weights.quality", "factors.percentile_floor"]
+
+# ------------------------------------------------------------
+# L8 治理
+# ------------------------------------------------------------
+journal:
+  log_path: "journal/decisions.jsonl"
+  error_types:
+    I: "买了坏公司（排雷层漏洞）"
+    II: "好公司买贵了（估值层门槛太松）"
+    III: "好公司没拿住（论文不够硬/仓位过重）"
+    IV: "该买没买（宇宙覆盖缺口/恐惧）"
