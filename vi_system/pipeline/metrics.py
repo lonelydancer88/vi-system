@@ -113,7 +113,10 @@ def _altman_z(cur: pd.Series, mktcap: float) -> float:
 
 def _metrics_for_code(g: pd.DataFrame, mktcap: float) -> dict:
     """对单只股票的年报序列计算全部指标。"""
-    g = g[g["period"].astype(str).str.endswith("1231")].sort_values("period")
+    # 先留一份全量：质押等「时点快照」数据的 period 是时间戳（如 202609040101）
+    # 而非年报，会被下面的年报过滤丢弃，需单独回退取用（见 pledge_ratio）。
+    full = g.sort_values("period")
+    g = full[full["period"].astype(str).str.endswith("1231")]
     if g.empty:
         return {}
     cur = g.iloc[-1]
@@ -128,6 +131,13 @@ def _metrics_for_code(g: pd.DataFrame, mktcap: float) -> dict:
     debt = (_v(cur, ST_DEBT, 0.0) or 0.0) + (_v(cur, LT_DEBT, 0.0) or 0.0) + (_v(cur, BONDS, 0.0) or 0.0)
     cash = _v(cur, CASH, 0.0) or 0.0
     ebit = _v(cur, EBIT)
+
+    # 质押快照：period 为时间戳而非年报，年报行取不到 → 从全量里取最新一条
+    if PLEDGE_RATIO in full.columns:
+        _pl = full[full[PLEDGE_RATIO].notna()]
+        pledge_val = _v(_pl.iloc[-1], PLEDGE_RATIO) if not _pl.empty else np.nan
+    else:
+        pledge_val = np.nan
 
     # -------------------------------------------------- 便宜（Value）
     ev = mktcap + (_v(cur, TOTAL_LIAB, 0.0) or 0.0) - cash
@@ -167,7 +177,9 @@ def _metrics_for_code(g: pd.DataFrame, mktcap: float) -> dict:
         "ocf_to_ni_5y": _d(hist5[OCF].sum(), hist5[NET_INCOME].sum())
         if {OCF, NET_INCOME}.issubset(hist5.columns) else np.nan,
         "goodwill_to_equity": _d(_v(cur, GOODWILL), eq),
-        "pledge_ratio": _v(cur, PLEDGE_RATIO),
+        # 质押为高频快照，年报行里恒为 NaN → 回退取全量内的最新快照。
+        # 其 announce_date 是抓取时刻，早期回测时点会被 facts_asof 正常过滤掉，不产生前视。
+        "pledge_ratio": pledge_val,
         "audit_nonstd": float(_v(cur, AUDIT_OPINION, 0.0) or 0.0),
         "audit_nonstd_3y": float(g.tail(3)[AUDIT_OPINION].max())
         if AUDIT_OPINION in g.columns and g.tail(3)[AUDIT_OPINION].notna().any() else 0.0,
