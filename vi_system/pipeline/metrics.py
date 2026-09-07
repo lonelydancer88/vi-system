@@ -145,6 +145,20 @@ def _metrics_for_code(g: pd.DataFrame, mktcap: float) -> dict:
     if not np.isfinite(div):
         div = _v(cur, DIVIDEND, np.nan)
 
+    # 净派现/回购比例：依赖 分红(DIVIDEND_PAID) / 回购(BUYBACK) / 增发(EQUITY_ISSUED) 三字段。
+    # 关键：若接口根本不提供这三字段（如腾讯当前数据），不能用默认值 0 强行算出
+    # net_payout = 0.0 —— 那会把「真不分红的票」与「数据缺失的票」画等号，
+    # 静默污染质量打分（曾导致伊利股份因字段缺失被误判低质量）。
+    # 三字段全缺 → 返回 NaN，打分按中性处理（不奖励也不惩罚）。
+    _dp = _v(cur, DIVIDEND_PAID, np.nan)
+    _bk = _v(cur, BUYBACK, np.nan)
+    _ei = _v(cur, EQUITY_ISSUED, np.nan)
+    if np.isnan(_dp) and np.isnan(_bk) and np.isnan(_ei):
+        net_payout = np.nan
+    else:
+        _numer = (0.0 if np.isnan(_dp) else _dp) + (0.0 if np.isnan(_bk) else _bk) - (0.0 if np.isnan(_ei) else _ei)
+        net_payout = _d(_numer, mktcap)
+
     m = {
         "ep": _d(ni, mktcap),
         "bp": _d(eq, mktcap),
@@ -156,9 +170,7 @@ def _metrics_for_code(g: pd.DataFrame, mktcap: float) -> dict:
         "gpa": _d(rev - _v(cur, COGS), ta),
         "roic": _d(ebit * (1 - TAX_RATE), eq + debt - cash) if np.isfinite(ebit) else np.nan,
         "accruals": _d(ni - ocf, ta),
-        "net_payout": _d(
-            (_v(cur, DIVIDEND_PAID, 0.0) or 0.0) + (_v(cur, BUYBACK, 0.0) or 0.0)
-            - (_v(cur, EQUITY_ISSUED, 0.0) or 0.0), mktcap),
+        "net_payout": net_payout,
 
         # -------------------------------------------------- 安全（Safety）
         # 利息覆盖倍数：腾讯把"财务费用"整体给出，现金充裕公司该值为负（净利息收入）。
@@ -204,7 +216,11 @@ def _metrics_for_code(g: pd.DataFrame, mktcap: float) -> dict:
         "total_share": _v(cur, TOTAL_SHARE),
     }
 
-    # 盈利能力 5 年变化（QMJ 的 Growth 块）
+    # 毛盈利能力 5 年变化（Novy-Marx QMJ 的 Growth 块）。
+    # 注意：这是 GPA(gross profitability = 毛利/总资产) 的 5 年几何变化率，
+    # 衡量「资产回报效率的改善速度」，**不是净利润或营收的增长率**。
+    # 若总资产暴涨而毛利增长跟不上，该项会为负（如伊利股份扩产导致资产摊薄、GPA 下降），
+    # 但这与「利润负增长」是两回事，命名易误导，特此说明。
     gpa_now = m["gpa"]
     if len(g) >= 5:
         gpa_old = _d(_v(g.iloc[-5], REVENUE) - _v(g.iloc[-5], COGS), _v(g.iloc[-5], TOTAL_ASSETS))
