@@ -104,6 +104,11 @@ def cmd_screen(args):
     if scored.empty:
         print("无候选（宇宙为空或全部被排雷否决）")
         return
+    # 排雷防线健康度：失效规则必须显式告警，避免静默失效给人虚假安全感
+    from .pipeline.vetoes import warn_dead_rules, rule_coverage
+    cov = rule_coverage(scored, cfg)
+    for w in warn_dead_rules(scored, cfg):
+        print(w)
     print(f"宇宙 {len(uni)} → 通过排雷 {len(scored)} → 过 AND 门槛 {int(scored['passes_gate'].sum())}")
     _write(_veto_md(rejected), Path(args.out), f"vetoes-{args.asof}.md")
     _write(valuation_mod.valuation_report(scored, args.top), Path(args.out), f"valuation-{args.asof}.md")
@@ -134,6 +139,9 @@ def cmd_portfolio(args):
     cfg = _cfg(args.config)
     st = _store(args.db)
     scored, _, _ = bt.screen_at(st, args.asof, cfg, with_valuation=True)
+    from .pipeline.vetoes import warn_dead_rules
+    for w in warn_dead_rules(scored, cfg):
+        print(w)
     pf = portfolio_mod.build_portfolio(scored, cfg)
     print(portfolio_mod.portfolio_report(pf, cfg))
     if args.out:
@@ -169,6 +177,9 @@ def cmd_monitor(args):
     cfg = _cfg(args.config)
     st = _store(args.db)
     scored, _, _ = bt.screen_at(st, args.asof, cfg, with_valuation=True)
+    from .pipeline.vetoes import warn_dead_rules
+    for w in warn_dead_rules(scored, cfg):
+        print(w)
     if scored.empty:
         print("无候选")
         return
