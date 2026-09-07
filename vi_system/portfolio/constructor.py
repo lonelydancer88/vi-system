@@ -144,8 +144,10 @@ def build_portfolio(
     ind = pd.Series(sel_df["industry"].values, index=sel_df["code"].values)
     w = _apply_caps(w, ind, max_pos, max_ind) * (1 - min_cash)
 
+    name_map = sel_df.set_index("code")["name"].reindex(w.index).values
     out = pd.DataFrame({
         "code": w.index,
+        "name": name_map,
         "weight": w.values,
         "industry": ind.reindex(w.index).values,
         "total_score": sel_df.set_index("code")["total_score"].reindex(w.index).values,
@@ -178,7 +180,8 @@ def portfolio_report(pf: pd.DataFrame, cfg: Config) -> str:
     for k, v in iw.items():
         lines.append(f"| {k} | {v:.2%} |")
     lines += ["", "## 持仓明细", "",
-              "| 代码 | 行业 | 权重 | 总分 |", "|------|------|------|------|"]
+              "| 代码 | 名称 | 行业 | 权重 | 总分 |", "|------|------|------|------|------|"]
     for _, r in pf.iterrows():
-        lines.append(f"| {r['code']} | {r['industry']} | {r['weight']:.2%} | {r['total_score']:.1f} |")
+        name = r.get("name", "")
+        lines.append(f"| {r['code']} | {name} | {r['industry']} | {r['weight']:.2%} | {r['total_score']:.1f} |")
     return "\n".join(lines)
