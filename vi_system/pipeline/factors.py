@@ -81,6 +81,10 @@ def score_factors(metrics: pd.DataFrame, cfg: Config) -> pd.DataFrame:
             if metric not in df.columns:
                 continue
             raw = pd.to_numeric(df[metric], errors="coerce")
+            # 防御：负数的分数次幂会产生复数（如 profit_growth_5y），
+            # 而 groupby.rank 不支持 complex dtype，会直接抛 TypeError
+            if np.iscomplexobj(raw):
+                raw = pd.Series(np.real(raw.to_numpy()), index=raw.index, dtype=float)
             # 方向：sign=1 越高越好；sign=-1 越低越好
             signed = raw * sign
             zs_in.append(_zscore_within(signed, df["industry"], winsor))

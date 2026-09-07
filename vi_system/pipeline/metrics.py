@@ -196,10 +196,12 @@ def _metrics_for_code(g: pd.DataFrame, mktcap: float) -> dict:
     gpa_now = m["gpa"]
     if len(g) >= 5:
         gpa_old = _d(_v(g.iloc[-5], REVENUE) - _v(g.iloc[-5], COGS), _v(g.iloc[-5], TOTAL_ASSETS))
-        if np.isfinite(gpa_now) and np.isfinite(gpa_old) and gpa_old != 0:
-            m["profit_growth_5y"] = (gpa_now / gpa_old) ** 0.2 - 1
-        else:
-            m["profit_growth_5y"] = np.nan
+        ratio = (gpa_now / gpa_old) if (np.isfinite(gpa_old) and gpa_old != 0) else np.nan
+        # 关键：gpa_old 为负时 ratio 可能为负，而「负数的 0.2 次幂」在 Python 里返回
+        # **复数**，会让整列变成 complex128，后续 groupby.rank 直接崩
+        # （真实数据里有亏损企业才触发，合成数据从未暴露过）。
+        # 比值 <= 0 时几何增长率无定义 → 置 NaN（打分时按中性处理）。
+        m["profit_growth_5y"] = float(ratio ** 0.2 - 1) if (np.isfinite(ratio) and ratio > 0) else np.nan
     else:
         m["profit_growth_5y"] = np.nan
 

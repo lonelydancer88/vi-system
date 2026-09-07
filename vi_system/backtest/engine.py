@@ -245,8 +245,9 @@ def sensitivity_test(store, cfg: Config, start: str, end: str) -> pd.DataFrame:
 # ==================================================================== 报告
 def backtest_report(results: dict, regimes: bool = True) -> str:
     lines = ["# 回测报告", ""]
-    for key in ("in_sample", "out_of_sample"):
-        r = results.get(key)
+    # 遍历所有结果，而不是硬编码 in_sample/out_of_sample ——
+    # 否则 full 模式（key="full"）会全部跳过，报告只剩标题。
+    for key, r in results.items():
         if not r or r.get("error"):
             continue
         s = r["stats"]
