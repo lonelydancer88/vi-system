@@ -183,6 +183,67 @@ def rule_coverage(metrics: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     return out.sort_values("coverage").reset_index(drop=True)
 
 
+def describe_rejection(rule: str, rule_desc: str, value, threshold) -> str:
+    """把一条 L3 否决记录转成带**具体数值**的一句话（供调仓原因 / 复盘引用）。
+
+    例如：
+      - 商誉占净资产过高（实际 45.2% > 上限 30.0%）
+      - 净负债/EBITDA 过高（实际 6.3× > 上限 5.0×）
+      - 近3年出现非标审计意见（非标=1，阈值 0.5）
+    rule_desc 是 apply_vetoes 记录的通用中文说明；这里按规则名补上实际值与阈值的单位。
+    """
+    def _fmt(v, kind: str) -> str:
+        if v is None or pd.isna(v):
+            return "—"
+        v = float(v)
+        if kind == "pct":
+            return f"{v * 100:.1f}%"
+        if kind == "x":
+            return f"{v:.1f}×"
+        if kind == "raw2":
+            return f"{v:.2f}"
+        if kind == "raw0":
+            return f"{v:.0f}"
+        return str(v)
+
+    # 各规则的展示单位（rule 可能带 industry: 前缀）
+    _UNIT = {
+        "pledge_ratio": "pct",          # 质押比例 0~1 → %
+        "goodwill_to_equity": "pct",    # 商誉/净资产 → %
+        "ocf_to_ni_5y": "pct",          # 5年OCF/净利 比值 → %
+        "share_dilution_5y": "pct",     # 5年股本累计增幅 → %
+        "beneish_m_score": "raw2",
+        "altman_z_score": "raw2",
+        "audit_opinion": "raw0",
+        "industry:npl_ratio_max": "pct",            # 不良率 → %
+        "industry:cet1_min": "pct",                 # 核心一级资本充足率 → %
+        "industry:provision_coverage_min": "x",     # 拨备覆盖率（倍数）
+        "industry:cash_to_short_debt_min": "x",     # 现金/短债（倍数）
+    }
+    # 规则方向：超过/低于 阈值触发（复合规则与 altman 单独写）
+    _MAX_RULES = {"pledge_ratio", "goodwill_to_equity", "share_dilution_5y",
+                  "beneish_m_score", "industry:npl_ratio_max"}
+    _MIN_RULES = {"ocf_to_ni_5y", "altman_z_score",
+                  "industry:provision_coverage_min", "industry:cet1_min",
+                  "industry:cash_to_short_debt_min"}
+
+    if rule == "leverage":
+        # 两条杠杆子规则由 rule_desc 区分（复合条件共用 rule 名）
+        if "净负债" in rule_desc:
+            return f"{rule_desc}（实际 {_fmt(value, 'x')} > 上限 {_fmt(threshold, 'x')}）"
+        return f"{rule_desc}（实际 {_fmt(value, 'x')} < 下限 {_fmt(threshold, 'x')}）"
+    if rule == "audit_opinion":
+        hit = "有" if float(value) > 0.5 else "无"
+        return f"{rule_desc}（近3年非标={hit}）"
+
+    kind = _UNIT.get(rule, "x")
+    if rule in _MAX_RULES:
+        return f"{rule_desc}（实际 {_fmt(value, kind)} > 上限 {_fmt(threshold, kind)}）"
+    if rule in _MIN_RULES:
+        return f"{rule_desc}（实际 {_fmt(value, kind)} < 下限 {_fmt(threshold, kind)}）"
+    return f"{rule_desc}（实际 {_fmt(value, kind)} vs 阈值 {_fmt(threshold, kind)}）"
+
+
 def warn_dead_rules(metrics: pd.DataFrame, cfg: Config) -> list[str]:
     """检测并显式告警「形同虚设」的排雷规则。
 

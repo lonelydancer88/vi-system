@@ -32,6 +32,8 @@ _PANEL_COLS = ("code", "name", "industry", "rank", "value_z",
                "mktcap", "fcf0", "fcf_is_fallback", "g_implied",
                "v_bull", "v_base", "v_bear", "v_mid",
                "buy_point", "sell_point", "downside_bear", "verdict")
+# 每期 L3 一票否决明细（reasons 回溯"为何没进候选池"需要具体规则与数值）
+_REJ_COLS = ("code", "name", "industry", "rule", "rule_desc", "value", "threshold")
 
 
 def screen_at(store, asof, cfg: Config, with_valuation: bool = False):
@@ -152,7 +154,7 @@ def run_backtest(
     nav, bench = 1.0, 1.0
     prev_w: pd.Series | None = None
     records, holdings_hist = [], []
-    panels, panel_meta = [], []
+    panels, panel_meta, panels_rej = [], [], []
 
     for i, d in enumerate(dates[:-1]):
         d_next = dates[i + 1]
@@ -160,11 +162,19 @@ def run_backtest(
             continue
 
         scored, rejected, uni = screen_at(store, d, cfg, with_valuation)
-        if with_panel and not scored.empty:
-            _cols = [c for c in _PANEL_COLS if c in scored.columns]
-            _sub = scored[_cols].copy()
-            _sub["date"] = d
-            panels.append(_sub)
+        if with_panel:
+            # 候选池（过 L3）打分快照：L4 + L5
+            if not scored.empty:
+                _cols = [c for c in _PANEL_COLS if c in scored.columns]
+                _sub = scored[_cols].copy()
+                _sub["date"] = d
+                panels.append(_sub)
+            # 被 L3 一票否决的明细：留痕具体规则与数值，供 reasons 给"具体原因"
+            if not rejected.empty:
+                _rcols = [c for c in _REJ_COLS if c in rejected.columns]
+                _rsub = rejected[_rcols].copy()
+                _rsub["date"] = d
+                panels_rej.append(_rsub)
         if scored.empty:
             w_new = pd.Series(dtype=float)
         else:
@@ -262,6 +272,8 @@ def run_backtest(
     }
     if with_panel:
         out["panel"] = pd.concat(panels, ignore_index=True) if panels else pd.DataFrame()
+        out["panel_rej"] = (pd.concat(panels_rej, ignore_index=True)
+                            if panels_rej else pd.DataFrame())
         out["panel_meta"] = panel_meta
     return out
 
@@ -614,6 +626,7 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
         return "# 交易台账\n\n（无持仓记录）"
     eff = result.get("effective_start")
     _by = _panel_by_date(result.get("panel"))
+    _by_rej = _panel_rej_by_date(result.get("panel_rej"))
     lines = [
         "# 交易轨迹（买卖台账）", "",
         "> **价与手数口径**：表中「价」= **真实不复权收盘价**（`close_raw`，经 amount/volume 反推"
@@ -648,7 +661,7 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
             if np.isfinite(p) and p > 0 and r["w_new"] > 1e-9:
                 lots = int(r["w_new"] * capital / p / 100)
                 cost = lots * 100 * p
-            _why = (_reason_cell(_by, d, r["code"], r["action"])
+            _why = (_reason_cell(_by, d, r["code"], r["action"], _by_rej, store)
                     if _by else "—（无面板）")
             lines.append(
                 f"| {d} | {r['action']} | {r['code']} | {r['name']} | {r['industry']} | "
@@ -834,11 +847,93 @@ def _valuation_from(g: pd.DataFrame | None, date, code: str) -> str:
     return "｜".join(parts)
 
 
-def _reason_cell(by_date: dict, date, code: str, action: str) -> str:
-    """交易原因文本 + L5 估值摘要（trades 台账「原因」列用；L4 已含在原因文本内）。"""
+def _reason_cell(by_date: dict, date, code: str, action: str,
+                 by_rej: dict | None = None, store=None) -> str:
+    """交易原因文本 + L5 估值摘要（trades 台账「原因」列用；L4 已含在原因文本内）。
+
+    当期不在候选池（过 L3 打分）的股票：by_rej 里有 L3 否决明细（或 L1 宇宙过滤）
+    时，给**具体规则 + 数值**，替代通用兜底文案。
+    """
     why = _action_reason_from(by_date, date, code, action)
+    if why.startswith("当期未进入候选池"):
+        if store is not None:
+            det = _absent_detail(store, date, code, by_rej)
+            if det:
+                return det
+        return why
     vtxt = _valuation_from(by_date.get(pd.Timestamp(date)), date, code)
     return f"{why}｜估值 {vtxt}" if vtxt else why
+
+
+def _panel_rej_by_date(panel_rej: pd.DataFrame | None) -> dict:
+    """把 with_panel 记录的 L3 否决明细按 date 分组（date -> 否决 DataFrame）。"""
+    if panel_rej is None or panel_rej.empty or "date" not in panel_rej.columns:
+        return {}
+    return {pd.Timestamp(dt): g for dt, g in panel_rej.groupby("date")}
+
+
+def _absent_detail(store, date, code: str, by_rej: dict | None = None) -> str:
+    """组合里出现、但当期不在候选池的股票：定位并解释具体原因。
+
+    按优先级：① 当期被 L3 一票否决（panel_rej 有 rule/value/threshold）
+              → ② 仍在 L1 宇宙源表但被点时过滤（退市/未上市/ST/北交所/停牌/流动性）
+    L1 阈值取 vi_system/config/rules.yaml 的 universe 默认值（min_listing_years=3、
+    min_avg_amount_60d=5e7、ST/退名称、北交所 8/4/9 前缀），与 cli 默认 cfg 一致。
+    定位不到返回空串（调用方保留通用兜底文案）。
+    """
+    d = pd.Timestamp(date)
+
+    # ① 当期 L3 排雷否决：给出具体规则与数值
+    if by_rej is not None:
+        gj = by_rej.get(d)
+        if gj is not None and not gj.empty:
+            row = gj[gj["code"] == code]
+            if not row.empty:
+                r = row.iloc[0]
+                try:
+                    hit = _vetoes.describe_rejection(
+                        r.get("rule"), r.get("rule_desc"), r.get("value"), r.get("threshold"))
+                except Exception:
+                    hit = str(r.get("rule_desc", "排雷规则触发"))
+                return f"L3 排雷否决：{hit}"
+
+    # ② 该期在 L1 宇宙源表（含退市历史）中、但被点时过滤
+    try:
+        u = store.load_universe()
+        if not u.empty and code in set(u["code"]):
+            row = u[u["code"] == code].iloc[0]
+            dd = row.get("delist_date")
+            if pd.notna(dd) and pd.to_datetime(dd) <= d:
+                return f"已退市（{pd.Timestamp(dd).date()} 退市）"
+            ld = row.get("list_date")
+            if pd.notna(ld) and pd.to_datetime(ld) > d:
+                return f"尚未上市（{pd.Timestamp(ld).date()} 才上市）"
+            nm = str(row.get("name", ""))
+            if any(p in nm for p in ("ST", "退市", "退")):
+                return f"名称含 ST/退市风险提示（{nm}）"
+            if str(code)[:3] in {"430", "830", "831", "832", "833", "834", "835",
+                                 "836", "837", "838", "839", "870", "871", "872", "873"}:
+                return "北交所板块（配置剔除）"
+            try:
+                m = store.market_asof(str(d.date()))
+                if not m.empty:
+                    mrow = m[m["code"] == code]
+                    if mrow.empty:
+                        return "无当日行情/停牌（未并入宇宙）"
+                    amt = mrow.iloc[0].get("avg_amount_60d")
+                    if pd.notna(amt) and amt < 5e7:
+                        return (f"流动性不足：60日均成交额 {amt / 1e4:.0f} 万元"
+                                f" < 门槛 5000 万元")
+            except Exception:
+                pass
+            if pd.notna(ld):
+                yrs = (d - pd.to_datetime(ld)).days / 365.25
+                if yrs < 3:
+                    return f"上市不足 3 年（仅 {yrs:.1f} 年）"
+            return "未进入当期候选池（L3 后异常丢失，请人工核查）"
+    except Exception:
+        pass
+    return ""
 
 
 def trade_reasons_report(result: dict, store, top_n: int = 0) -> str:
@@ -855,11 +950,14 @@ def trade_reasons_report(result: dict, store, top_n: int = 0) -> str:
     rec = result["records"]
     rec_by = rec.set_index("date") if rec is not None and "date" in rec.columns else None
     by_date = _panel_by_date(panel)
+    by_rej = _panel_rej_by_date(result.get("panel_rej"))
 
     lines = ["# 逐期调仓原因", "",
              "> 依据：与每次调仓同期的因子面板（with_panel=True 记录）。价值/质量/安全三支柱为"
              "**行业内中性 z**（相对同行标准差；过 AND 门需各柱 z≥0，即每柱都跑赢行业均值）；"
              "排名越小越优。",
+             "> 动作股当期**不在候选池**（未进 L3 打分）时，「原因」列会给出**具体原因与数值**"
+             "（L3 排雷否决带实际值 vs 阈值；或 L1 退市/ST/流动性等）。",
              "> **估值(L5)**：同期的逆向 DCF + 三情景（v_mid=三情景中位数，买点=v_mid×0.70，"
              "卖点=v_mid×1.50，单位：亿元）；「空间」= v_mid 相对当期市值的空间；「隐含g」为市场价"
              "反解的永续增长率。历史早期财报现金流缺失时列为 —。", ""]
@@ -886,6 +984,10 @@ def trade_reasons_report(result: dict, store, top_n: int = 0) -> str:
                   "|------|------|------|---------|------|"]
         for t in show:
             why = _action_reason_from(by_date, d, t["code"], t["action"])
+            if why.startswith("当期未进入候选池"):
+                det = _absent_detail(store, d, t["code"], by_rej)
+                if det:
+                    why = det
             vtxt = _valuation_from(by_date.get(pd.Timestamp(d)), d, t["code"])
             ind = (t.get("industry") or "") or ""
             name = t.get("name") or t["code"]
