@@ -82,7 +82,9 @@ def main():
           f"| 胜率(对基准) | {st_.get('win_rate_vs_bench', float('nan')):.1%} | — |",
           f"| 平均换手 | {st_.get('avg_turnover', float('nan')):.1%} | — |",
           f"| 平均持仓数 | {st_.get('avg_holdings', float('nan')):.1f} | — |", "",
-          "净值曲线见 [nav-curve.png](./nav-curve.png)（30只/5只/3只/等权/沪深300 对比）。", ""]
+          "**净值曲线**", "",
+          "![净值曲线（30只/5只/3只/等权/沪深300 对比）](./nav-curve.png)",
+          "> 图中含 30只 / 5只 / 3只 / 等权全市场 / 沪深300 五条累计净值；本报告对应**策略 5 只**档。", ""]
 
     # ---------------- 逐期
     rec = r["records"].set_index("date") if r.get("records") is not None else None
