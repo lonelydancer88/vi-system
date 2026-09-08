@@ -261,8 +261,12 @@ class WeStockFetcher:
                     (sga if np.isfinite(sga) else (adm if np.isfinite(adm) else np.nan))
                 ocf, fcff = _f(c, "NetOperateCashFlow"), _f(c, "FCFF")
                 vals[CAPEX] = (ocf - fcff) if np.isfinite(ocf) and np.isfinite(fcff) else np.nan
-                vals[ST_DEBT] = 0.0
-                vals[BONDS] = 0.0
+                # 注意：本源(westock/腾讯)不提供短期借款(st_borrow)/应付债券(bond_payable)，
+                # 也不提供商誉/折旧/审计意见/增发。此前曾硬编码为 0.0，但「缺失=0」会静默
+                # 污染净负债/现金短债比等因子（与 net_payout 同类 bug）。改为不产出该字段，
+                # 由 metrics 层按「缺失即 NaN」中性处理。
+                # 需要真实短债/应付债 → 改用 fetcher.py(TushareFetcher)，其 BALANCE_MAP 已
+                # 映射 st_borrow→ST_DEBT / bond_payable→BONDS（需 TUSHARE_TOKEN）。
                 vals[NPL_RATIO] = np.nan
                 vals[PROVISION_COVERAGE] = np.nan
                 vals[CET1] = np.nan
