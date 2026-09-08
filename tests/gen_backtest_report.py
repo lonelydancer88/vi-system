@@ -123,6 +123,23 @@ def main():
                          f"{t['w_prev']:.1%} | {t['w_new']:.1%} | {chg} | {why}{cap_note} |")
             L.append("")
 
+        # ---------- 当期卖出（清仓/减持）已实现盈亏
+        sells = [t for t in trades if t["action"] in ("清仓", "减持")]
+        if sells:
+            L += ["**当期卖出（已实现盈亏）**", "",
+                  "| 名称 | 行业 | 动作 | 卖出价 | 建仓成本 | 已实现收益 |",
+                  "|------|------|------|--------|---------|-----------|"]
+            for t in sorted(sells, key=lambda x: x["action"]):
+                prc = t.get("price")
+                cst = t.get("cost")
+                rtv = t.get("ret")
+                prc_f = f"{prc:.2f}" if (prc is not None and np.isfinite(prc)) else "—"
+                cst_f = f"{cst:.2f}" if (cst is not None and np.isfinite(cst)) else "—"
+                rtv_f = f"{rtv:+.1%}" if (rtv is not None and np.isfinite(rtv)) else "—"
+                L.append(f"| {t['name']} | {t.get('industry', '')} | {t['action']} | "
+                         f"{prc_f} | {cst_f} | {rtv_f} |")
+            L.append("")
+
         # ---------- 期末持仓
         snap = blk.get("snap", [])
         if snap:
