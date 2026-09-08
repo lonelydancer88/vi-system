@@ -520,7 +520,11 @@ def test_real_anchors():
     check("伊利(sh600887) 不在持仓（过不了 L4）", "sh600887" not in set(scored[scored["passes_gate"]]["code"]))
     # z 版回归锚点：行业内中性 z 加权 top1（旧 pct 语义时该时点为圆通 #1）
     top = scored.sort_values("total_score", ascending=False).iloc[0]["code"]
-    check("2026-09-07 总分 top1 = sz002027（分众传媒）", top == "sz002027", f"top={top}")
+    # 回归锚点：行业内中性 z 加权 top1。
+    # 2026-09-08 修正第三类股本 bug（大比例送转/增发后股本停在旧值）后，
+    # 分众传媒 sz002027 市值由错误的 15.94 亿修正为真实的 712 亿、圆通 sh600233 由 163.65 亿
+    # 修正为 570.78 亿，二者「假便宜」消失、退出 top1，新奥股份 sh600803 升至第一。
+    check("2026-09-07 总分 top1 = sh600803（新奥股份）", top == "sh600803", f"top={top}")
     # 排雷失效告警：商誉字段全缺 → 判 dead 并告警；质押在当期有快照数据 → 不判 dead
     warns = vetoes.warn_dead_rules(scored, cfg)
     joined = " ".join(warns)

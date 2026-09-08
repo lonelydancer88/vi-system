@@ -714,6 +714,13 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
               "脚本 `tests/fix_face_value_shares.py`（备份 `*.bak_facevalue`，受 .gitignore 忽略）。"
               "其中紫金/洛阳/中芯/华润同在 prices 中，其估值因子与 share_dilution 已回归真实；"
               "洛阳钼业为当前 #1 持仓，mktcap 由约 786 亿→3932 亿（×5），估值因子由偏乐观修正为偏悲观，候选池与入选可能改变。",
+              "- **第三类股本 bug 已修复（2026-09-08）：大比例送转/增发/借壳后股本停在旧值**。"
+              "用东方财富 F10「股本变动历史」全量核对 298 只，发现 34 只偏差 >5%"
+              "（中国移动 21.6×、分众传媒 0.023×、领益智造 0.23×、圆通速递 0.28×、东方盛虹 1.45× 等）；"
+              "因其值长期不变，跳变检测抓不到。已按东财变动日 point-in-time 回填 facts 并重算 prices 的 mktcap"
+              "（`tests/fetch_em_share_history.py` 抓取 + `tests/fix_shares_from_em.py` / "
+              "`tests/fix_prices_shares_em.py` 修正，备份 `*.bak_emshare`）。"
+              "修复后全量复核 298 只偏差全部 <0.2%。此修复影响估值因子与候选池，回测结果已据此处重跑。",
               "- **已知口径**：信号与成交同为调仓日收盘（未实现 t+1）；基准指数为价格回报口径"
               "（不含股息）；质押/审计意见字段的 announce_date 为抓取时刻，回测历史时点不可见"
               "（该两条排雷规则在回测中形同虚设，实盘才有）。",
