@@ -7,7 +7,7 @@
 #     build_demo_store()             生成 smoke_db / correctness_db
 #     tests/fetch_real.py            重抓 vi_db / real_universe
 #   data/*/*.log、smoke_decisions.jsonl                运行时日志
-/data/*/prices.parquet.bak*
+/data/*/*.parquet.bak*
 /data/*/prices.parquet.full
 /data/demo/
 /data/smoke_db/
