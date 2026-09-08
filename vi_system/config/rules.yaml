@@ -4,9 +4,9 @@
 # 改参数必须新增版本（version + effective_date），禁止原地修改。
 # ============================================================
 
-version: "1.1"
-effective_date: "2026-09-07"
-note: "v1.0 初始占位值。v1.1 修正重资产行业排雷误杀：对公用事业/房地产/建筑装饰/交通运输/钢铁/环保豁免 leverage+altman_z（低Z高负债为商业模式而非破产信号）；share_dilution_5y 上限 0.20→0.50（原阈值把正常股本增长也误判为稀释）。属修 bug 级缺口，非收益优化。"
+version: "1.2"
+effective_date: "2026-09-08"
+note: "v1.1 修正重资产行业排雷误杀。v1.2 评分体系重构落地配置：三支柱门槛由行业内百分位 pct>=30 改为行业内中性 z>=z_threshold（默认 0，即每柱跑赢行业均值）；移除已废弃的 percentile_floor；敏感性检验参数同步更新（percentile_floor 已死参数 → winsorize）。另：本次随代码修复了 skip_empty 基准未重新锚定、换手漂移被覆盖两个回测 bug。"
 
 # ------------------------------------------------------------
 # L1 宇宙层
@@ -80,7 +80,7 @@ factors:
   winsorize: 3.0                    # z-score 截断
   median_window_years: 5            # 先取N年中位数再打分
   min_industry_size: 5              # 行业内样本不足则不打分（标 NaN）
-  percentile_floor: 30              # 三支柱各自最低分位门槛（AND 门）
+  z_threshold: 0.0                  # AND 门：每柱行业内 z >= 此值（0=跑赢行业均值；右偏分布下过门率<50%）
 
   weights:
     value: 0.4
@@ -171,7 +171,9 @@ backtest:
   benchmark: "equal_weight_universe"   # 真实基准(中证红利质量/低波)需外部数据
   sensitivity:
     perturb: 0.20                   # 核心参数 ±20% 扰动检验
-    params: ["factors.weights.value", "factors.weights.quality", "factors.percentile_floor"]
+    # 注意：z_threshold 默认 0，乘法扰动 (0×1.2=0) 是空转，故不列入；
+    # 这里只列可乘法扰动的参数
+    params: ["factors.weights.value", "factors.weights.quality", "factors.winsorize"]
 
 # ------------------------------------------------------------
 # L8 治理

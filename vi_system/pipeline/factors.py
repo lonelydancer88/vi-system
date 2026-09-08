@@ -54,7 +54,7 @@ def score_factors(metrics: pd.DataFrame, cfg: Config) -> pd.DataFrame:
 
     fcfg = cfg.section("factors")
     winsor = fcfg.get("winsorize", 3.0)
-    floor = fcfg.get("percentile_floor", 30)
+    zthr = fcfg.get("z_threshold", 0.0)
     min_ind = fcfg.get("min_industry_size", 5)
     weights = fcfg.get("weights", {"value": 0.4, "quality": 0.4, "safety": 0.2})
 
@@ -110,8 +110,8 @@ def score_factors(metrics: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     #  ① 行业内 pct 只在行业内可比——不同行业样本量下 pct 阶梯分辨率不同（5 只=20/40/60/80/100、
     #     20 只则细密得多），拿它做跨行业总分排序会让分数尺度不可比；
     #  ② z 是「相对同行多少个标准差」，跨行业可比、且保留领先幅度（A 领先 3σ 与 B 微弱第一不再同分）。
-    #     z≥0 即「每柱都跑赢行业典型（中位）」，AND 门取三者同时满足。
-    zthr = fcfg.get("z_threshold", 0.0)
+    #     z≥0 即「每柱都跑赢行业**均值**」（注意：z 基于 mean/std 标准化，不是中位数；
+    #     右偏分布下均值被极端值拉偏，过门率会明显低于 50%，实测 108-119 只候选仅 11-29 只过门）。
     gate = pd.Series(True, index=df.index)
     for pillar in pillars:
         z = df[f"{pillar}_z"]

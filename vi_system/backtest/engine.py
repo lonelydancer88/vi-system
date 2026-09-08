@@ -122,7 +122,9 @@ def run_backtest(
     day = bcfg.get("rebalance_day", 15)
     cost = bcfg.get("cost_per_side", 0.005)
 
-    # 提前一天取价，确保调仓信号与成交价不重合
+    # 执行口径：screen_at(d) 的信号与 px.loc[d] 的成交同为调仓日收盘价
+    # （close_adj）。严格的 t+1 执行（次日开盘）尚未实现；对财务慢因子而言
+    # 同日收盘执行的前视影响可忽略，但比 t+1 口径略偏乐观。
     dates = store.rebalance_dates(months, day, start, end)
     if len(dates) < 3:
         return {"error": f"调仓日不足（{len(dates)}），请放宽时间区间"}
@@ -206,7 +208,9 @@ def run_backtest(
             "n_rejected": len(rejected), "nav": nav, "bench": bench,
         })
         holdings_hist.append({"date": d, "weights": w_new})
-        prev_w = w_new
+        # 注意：prev_w 保持为上面漂移后的权重（drift）——下一期的换手要相对
+        # 「持仓经本期收益漂移后的自然权重」计算，而不是本期的目标权重。
+        # 曾在这里误写 prev_w = w_new 把 drift 覆盖掉，导致换手率系统性偏高。
 
     if not records:
         return {"error": "回测未产生任何有效周期"}
@@ -214,13 +218,24 @@ def run_backtest(
     # ---- 跳过空仓期初：从首个实际持有股票的调仓日起算（数据可得性）
     # 财务因子 point-in-time 最早只到 FY2016（2017 年披露），更早调仓组合为空、
     # 全程平走，纳入会虚增/虚减年化收益。剔除后业绩归因更干净。
+    #
+    # 关键：剔除后必须把 nav/bench **重新锚定到 1**。records 里的 nav/bench 是
+    # 从首期开始累乘的累积值，若只删行不重置，基准会把空仓期（2013-2017）的
+    # 涨跌摊进剩余年数的年化里——曾把 HS300 基准年化从 3.18% 虚推到 6.54%，
+    # 策略超额被等幅低估（实测：+1.63% → 真实 +4.99%）。
     eff_start = records[0]["date"]
     n_skipped = 0
     if skip_empty:
         first = next((i for i, r in enumerate(records) if r["n_holdings"] > 0), 0)
         if first > 0:
             n_skipped = first
+            anchor_nav = records[first - 1]["nav"]
+            anchor_bench = records[first - 1]["bench"]
             records = records[first:]
+            if anchor_nav > 0 and anchor_bench > 0:
+                for r in records:
+                    r["nav"] /= anchor_nav
+                    r["bench"] /= anchor_bench
             holdings_hist = holdings_hist[first:]
             eff_start = records[0]["date"]
 
@@ -577,7 +592,7 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
         f"> 实算起点 **{eff}**，共 {len(ledger)} 次调仓。"
         f"「建仓/清仓」为该期新进/退出，「增持/减持」为权重上调/下调。", "",
         "> **原因口径**：「原因」为该动作在**同期截面**的信号——三支柱为**行业内中性 z**"
-        "（相对同行多少个标准差，过 AND 门需各柱 z≥0 即跑赢行业典型），排名越小越优。"
+        "（相对同行标准差，过 AND 门需各柱 z≥0 即跑赢行业均值），排名越小越优。"
         f"{'（未记录因子面板，如需原因需以 with_panel=True 重跑）' if not _by else ''}", "",
         "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 目标手数 | 占用资金(元) | 原因 |",
         "|--------|------|------|------|------|---------|---------|------|--------|---------|------------|------|",
@@ -625,23 +640,18 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
     for c, v in top:
         lines.append(f"| {c} | {v['name']} | {v['buy']} | {v['sell']} |")
     lines += ["", "---", "",
-              "**数据质量附注（2026-09-08 排查结论）**", "",
-              "- **净值/业绩可信**：回测用 `close_adj`（后复权），经核查全量无负值、无异常跳变、"
-              "区间回报符合常识（茅台 2017→2026 后复权 3.68×、工行 1.85×、中国建筑 0.99× 含股息），"
-              "故年化/超额/IR/回撤等基于它的指标**可信**。",
-              "- **台账买卖动作可信**：建仓/清仓/增减由因子打分的截面排名驱动，可反映策略调仓逻辑。",
-              "- **价格层 `close_raw` 已修复（扎实）**：原 `close_raw`（不复权价）在 2013–2021 段异质损坏"
-              "（含负值与正数偏低），已用 `amount/volume`（接口成交量额全期完好）反推真实成交价重建，"
-              "与公开真实价高度吻合（茅台 2013≈194/真实210、2017≈466/真实450）。此层可靠。",
-              "- **市值层 `total_share` 源数据错误（已部分修正）**：`mktcap`=close_raw×total_share，"
-              "而 westock/腾讯源的`总股本`字段在少数股票上级错误（中国移动 ×21、中国建筑 ×10，已用公开真实值核实；"
-              "`facts` 表同源亦错）。完整重建后对比发现：原报告 13.49% 年化建立在错误 `mktcap` 上属虚高、不可信；"
-              "仅修正已确证两股后当前年化 11.56%，对沪深300（价格回报）超额 +5.03%/IR 0.93。",
-              "- **局限（重要）**：当前仅修正了已公开确证的两只错股，其余 `total_share` 错误若存在仍可影响个别选股与"
-              "业绩精确值。全量干净重建需 tushare token 或能访问东方财富的环境——当前网络下 akshare 东财源被代理拦截、"
-              "腾讯源股本字段同源错误、新浪源无股本字段，自动全量重建不可行。",
-              "- **台账价格列**：原为损坏的 `close_raw`（如茅台 2017 显示 127 元），已统一改为可信的"
-              " `close_adj`（后复权口径）。",
+              "**数据质量附注（2026-09-08 修复与 review 后的现行口径）**", "",
+              "- **净值/业绩**：回测用 `close_adj`（后复权，含分红再投），全量无负值/异常跳变，"
+              "区间回报符合常识（茅台 2017→2026 后复权 3.68×），基于它的年化/回撤等指标可信。",
+              "- **价格层 `close_raw` 已修复**：2013–2021 段原值异质损坏（含负值与正数偏低），"
+              "已用 amount/volume 反推全量重建，并修正科创板 688 volume 重复×100 的单位 bug。"
+              "台账「真实价/手数/占用资金」即用此层，可与行情对照。",
+              "- **市值层 `total_share` 已部分修正**：中国移动（×21）、中国建筑（×10）两处源数据错误"
+              "已手动修正；其余个股未全量核对（review 抽查发现中国海油市值疑似仍偏高 ~1.6×，待核实）。"
+              "估值类因子（EP/BP/CFP/EBIT_EV/股息率）依赖 mktcap，个别错股仍可能影响选股。",
+              "- **已知口径**：信号与成交同为调仓日收盘（未实现 t+1）；基准指数为价格回报口径"
+              "（不含股息）；质押/审计意见字段的 announce_date 为抓取时刻，回测历史时点不可见"
+              "（该两条排雷规则在回测中形同虚设，实盘才有）。",
               ]
     return "\n".join(lines)
 
@@ -688,13 +698,13 @@ def _action_reason_from(by_date: dict, date, code: str, action: str) -> str:
     sc_txt = f"，总分 {float(sc):+.2f}" if _num(sc) else ""
     if action == "建仓":
         if gate:
-            return (f"三支柱均≥行业中位 z≥0（价值z {v}/质量z {q}/安全z {ss}），"
+            return (f"三支柱均跑赢行业均值 z≥0（价值z {v}/质量z {q}/安全z {ss}），"
                     f"当期排名 {rk_txt}{sc_txt}，新进入目标组合")
         return (f"当期三支柱未全过 z≥0 门槛（价值z {v}/质量z {q}/安全z {ss}）"
                 "仍入选（候选不足等例外通道）")
     if action == "清仓":
         if not gate:
-            return (f"当期三支柱跌破行业中位 z≥0（价值z {v}/质量z {q}/安全z {ss}），"
+            return (f"当期三支柱跌破行业均值 z≥0（价值z {v}/质量z {q}/安全z {ss}），"
                     f"排名 {rk_txt}，被清出")
         return (f"当期仍过 z 门槛但排名 {rk_txt}{sc_txt}，未进新一期目标组合"
                 "（被总分更优/同行业者挤出）")
@@ -718,7 +728,7 @@ def trade_reasons_report(result: dict, store, top_n: int = 0) -> str:
 
     lines = ["# 逐期调仓原因", "",
              "> 依据：与每次调仓同期的因子面板（with_panel=True 记录）。价值/质量/安全三支柱为"
-             "**行业内中性 z**（相对同行标准差；过 AND 门需各柱 z≥0，即每柱都跑赢行业典型）；"
+             "**行业内中性 z**（相对同行标准差；过 AND 门需各柱 z≥0，即每柱都跑赢行业均值）；"
              "排名越小越优。", ""]
     ledger = trade_ledger(result, store)
     n_show = 0

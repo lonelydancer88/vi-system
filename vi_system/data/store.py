@@ -180,10 +180,15 @@ class Store:
         last_date = hist["date"].max()
         snap = hist[hist["date"] == last_date].copy()
 
-        # 近60交易日日均成交额。
-        # 只截取最近约 70 个自然日的窗口再分组 —— 对全历史 groupby 会让
-        # 每个调仓截面都付出 O(全表) 的代价，回测里会被放大几十倍。
-        window = hist[hist["date"] > last_date - pd.Timedelta(days=100)]
+        # 近 60 个交易日日均成交额。
+        # 按精确的「最近 60 个交易日」窗口计算（此前用 100 自然日窗口 ≈ 68 个
+        # 交易日，与字段名/配置注释的「60 交易日」不符，导致阈值口径偏松）。
+        # 只在窗口日期上过滤再分组 —— 对全历史 groupby 会让每个调仓截面都
+        # 付出 O(全表) 的代价，回测里会被放大几十倍。
+        recent_dates = set(
+            pd.DatetimeIndex(sorted(hist["date"].unique()))[-60:]
+        )
+        window = hist[hist["date"].isin(recent_dates)]
         amt = (
             window.groupby("code")["amount"]
             .mean()

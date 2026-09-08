@@ -182,7 +182,7 @@ def test_factors():
     cfg = load_config()
 
     # 单行业 6 只：V0 价值极差；V1 全面最优；V2..V5 普通。
-    # z 语义：过 AND 门需三柱 z 都 ≥0（跑赢行业典型）；行业内完全同质时无人能过。
+    # z 语义：过 AND 门需三柱 z 都 ≥0（跑赢行业均值）；行业内完全同质时无人能过。
     rows = []
     for i in range(6):
         if i == 0:
@@ -204,7 +204,7 @@ def test_factors():
     check("价值垫底股 passes_gate=False", not bool(a["passes_gate"]))
     b = scored[scored["code"] == "V1"].iloc[0]
     check("全面最优股 passes_gate=True", bool(b["passes_gate"]))
-    check("全面最优股三支柱 z 均 >=0（跑赢行业典型）",
+    check("全面最优股三支柱 z 均 >=0（跑赢行业均值）",
           b["value_z"] >= 0 and b["quality_z"] >= 0 and b["safety_z"] >= 0)
 
     # 总分权重重构一致：total = 0.4*value_z + 0.4*quality_z + 0.2*safety_z
@@ -429,6 +429,32 @@ def test_backtest():
         check("分状态检验返回非空", not bt.regime_report(res1).empty)
 
 
+def test_skip_empty_anchor():
+    print("\n[9c] skip_empty 基准重新锚定（回归：剔除空仓期后基准年化不得含空仓段涨幅）")
+    cfg = load_config()
+    # 行情早于财报：price 2016 起、facts FY2018 起（2019 披露）→ 期初必有空仓期
+    with tempfile.TemporaryDirectory() as td:
+        st = build_demo_store(td, GenConfig(n_stocks=40, seed=7, fund_start_year=2018,
+                                            fund_end_year=2026, price_start="2016-01-01"),
+                              overwrite=True)
+        rA = bt.run_backtest(st, cfg, "2016-01-01", "2026-06-30", benchmark="equal")
+        check("回测无错误", "error" not in rA, rA.get("error", ""))
+        if "error" in rA:
+            return
+        check("确有空仓期被剔除（skipped>0）", rA["skipped_empty_periods"] > 0,
+              f"skipped={rA['skipped_empty_periods']}")
+        rB = bt.run_backtest(st, cfg, rA["effective_start"], "2026-06-30", benchmark="equal")
+        check("skip 起跑与从实算起点直接跑，策略年化一致",
+              np.isclose(rA["stats"]["cagr"], rB["stats"]["cagr"]),
+              f"{rA['stats']['cagr']:.4%} vs {rB['stats']['cagr']:.4%}")
+        check("skip 起跑与从实算起点直接跑，基准年化一致（锚定修复）",
+              np.isclose(rA["stats"]["bench_cagr"], rB["stats"]["bench_cagr"]),
+              f"{rA['stats']['bench_cagr']:.4%} vs {rB['stats']['bench_cagr']:.4%}")
+        check("基准曲线起点≈首期收益（不含空仓段累积）",
+              0.5 < float(rA["nav"]["bench"].iloc[0]) < 1.5,
+              f"bench[0]={rA['nav']['bench'].iloc[0]:.4f}")
+
+
 def test_index_benchmark():
     print("\n[9b] 指数基准接入（HS300 行情作基准）")
     cfg = load_config()
@@ -516,6 +542,7 @@ def main():
     test_universe()
     test_data_gaps()
     test_backtest()
+    test_skip_empty_anchor()
     test_index_benchmark()
     test_real_anchors()
 

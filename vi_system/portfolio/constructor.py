@@ -77,8 +77,11 @@ def build_portfolio(
         df = df[df["avg_amount_60d"] >= liq_floor]
 
     cand = df[df["passes_gate"]].copy()
+    # 门即纪律（决策 A：允许不满仓）：无人过 AND 门槛时保持空仓，
+    # 不兜底买未过门的头部——「候选不足」不是放松买入标准的理由。
+    # （旧版此处为 cand = df.head(hi)，会在极端行情下悄悄凑仓，违背该决策。）
     if cand.empty:
-        cand = df.head(hi).copy()
+        return pd.DataFrame(columns=["code", "weight", "industry", "total_score"])
     cand = cand.sort_values("total_score", ascending=False)
     ind_map = df.set_index("code")["industry"].to_dict()
 
