@@ -517,30 +517,45 @@ def trade_ledger(result: dict, store) -> list:
         ind_map = u.get("industry", pd.Series(dtype=str)).to_dict()
     except Exception:
         name_map, ind_map = {}, {}
-    # 价格快照：用 close_raw（真实不复权收盘价），供手数/占用资金换算与对照行情。
+    # 价格快照：双口径。
+    #  - close_raw（真实不复权收盘价）：用于「真实价 / 手数 / 占用资金」换算与对照行情。
+    #  - close_adj（后复权，含分红再投）：用于「收益」列 —— 直接拿 close_raw 跨除权日比价，
+    #    送转 / 增发 / 大额分红会把收益算错（实测传音 2024 十转四把 -20% 真跌夸大成 -45.5%）。
+    #    收益口径与回测 NAV（同为 close_adj）保持一致，可跨期对比。
     # 说明：close_raw 经 2026-09-08 两次修复后已可信 ——
     #  ① amount/volume 反推（原 2013–2021 段负值/异质缩放损坏已覆盖）；
     #  ② 科创板 688 板块 volume 单位重复×100 的 bug（价格/市值低估 100 倍）已修正。
-    # 后复权 close_adj 仍用于回测净值口径（含分红再投），但不用于台账报价。
     try:
         _px = store.load_prices()
         _px["date"] = pd.to_datetime(_px["date"])
         _idx = _px.set_index(["date", "code"])
-        def price_at(d, c):
+        def _px_at(d, c, col):
             try:
                 row = _idx.loc[(pd.to_datetime(d), c)]
-                raw = float(row["close_raw"]) if "close_raw" in row else np.nan
-                if np.isfinite(raw) and raw > 0:
-                    return raw
-                adj = float(row["close_adj"]) if "close_adj" in row else np.nan
-                return adj if np.isfinite(adj) else np.nan
+                v = float(row[col]) if col in row else np.nan
+                return v if np.isfinite(v) else np.nan
             except Exception:
                 return np.nan
+
+        def price_at(d, c):        # 展示用：真实不复权收盘价
+            raw = _px_at(d, c, "close_raw")
+            if np.isfinite(raw) and raw > 0:
+                return raw
+            return _px_at(d, c, "close_adj")
+
+        def adj_at(d, c):          # 收益用：后复权价（含分红再投，与 NAV 同口径）
+            adj = _px_at(d, c, "close_adj")
+            if np.isfinite(adj) and adj > 0:
+                return adj
+            return _px_at(d, c, "close_raw")
     except Exception:
-        price_at = lambda d, c: np.nan
+        def price_at(d, c):
+            return np.nan
+        def adj_at(d, c):
+            return np.nan
 
     ledger = []
-    first_cost = {}          # code -> 首次建仓真实价（跨期追踪，作为持有收益的成本基准）
+    first_cost = {}    # code -> {"raw": 首次建仓真实价, "adj": 首次建仓后复权价}（跨期追踪收益基准）
     prev = pd.Series(dtype=float)
     for h in holdings:
         d = h["date"]
@@ -563,12 +578,16 @@ def trade_ledger(result: dict, store) -> list:
                 action = "持有"
             if action == "持有":
                 continue
-            price = price_at(d, c)
+            price = price_at(d, c)      # 真实价（展示）
+            adj = adj_at(d, c)          # 后复权价（收益）
             if action == "建仓" and c not in first_cost:
-                first_cost[c] = price
-            cost = first_cost.get(c)
-            ret = (price - cost) / cost if (cost is not None and np.isfinite(cost)
-                                            and np.isfinite(price) and cost > 0) else np.nan
+                first_cost[c] = {"raw": price, "adj": adj}
+            cost0 = first_cost.get(c)
+            cost = cost0.get("raw") if cost0 else np.nan
+            cost_adj = cost0.get("adj") if cost0 else np.nan
+            ret = ((adj - cost_adj) / cost_adj
+                   if (cost_adj is not None and np.isfinite(cost_adj) and cost_adj > 0
+                       and np.isfinite(adj)) else np.nan)
             if action == "清仓" and c in first_cost:
                 del first_cost[c]          # 清仓后若再建仓，成本基准重置（算完 ret 后再删）
             rows.append({
@@ -581,6 +600,7 @@ def trade_ledger(result: dict, store) -> list:
                 "w_chg": w_new - w_prev,
                 "price": price,
                 "cost": cost,
+                "cost_adj": cost_adj,
                 "ret": ret,
             })
         # 本期完整持仓快照（含「持有」无动作股），用于报告「每只股票目前的收益」
@@ -588,15 +608,20 @@ def trade_ledger(result: dict, store) -> list:
         for c in cur.index:
             if float(cur.get(c, 0.0)) > 0:
                 pr = price_at(d, c)
-                cost = first_cost.get(c)
-                ret = (pr - cost) / cost if (cost is not None and np.isfinite(cost)
-                                             and np.isfinite(pr) and cost > 0) else np.nan
+                cost0 = first_cost.get(c)
+                cost = cost0.get("raw") if cost0 else np.nan
+                cost_adj = cost0.get("adj") if cost0 else np.nan
+                adj = adj_at(d, c)
+                ret = ((adj - cost_adj) / cost_adj
+                       if (cost_adj is not None and np.isfinite(cost_adj) and cost_adj > 0
+                           and np.isfinite(adj)) else np.nan)
                 snap.append({
                     "code": c,
                     "name": name_map.get(c, c),
                     "industry": ind_map.get(c, ""),
                     "price": pr,
                     "cost": cost,
+                    "cost_adj": cost_adj,
                     "ret": ret,
                     "w": float(cur.get(c, 0.0)),
                 })
@@ -629,9 +654,11 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
     _by_rej = _panel_rej_by_date(result.get("panel_rej"))
     lines = [
         "# 交易轨迹（买卖台账）", "",
-        "> **价与手数口径**：表中「价」= **真实不复权收盘价**（`close_raw`，经 amount/volume 反推"
-        " + 科创板 688 volume 单位修复后可信），可对照行情；后复权 `close_adj` 仍用于回测净值口径"
-        "（含分红再投）。", "",
+        "> **价与手数口径**：表中「真实价」= **真实不复权收盘价**（`close_raw`，经 amount/volume 反推"
+        " + 科创板 688 volume 单位修复后可信），用于对照行情与手数/占用换算。"
+        "**「收益」列 = 后复权 `close_adj` 口径（含分红再投，与净值 NAV 同口径）**——"
+        "不用未复权价直接比价，否则持仓跨送转/增发除权会把收益算错（实测传音 2024 十转四"
+        "把 −20% 真跌夸大成 −45%）。", "",
         f"> 手数与占用资金按本金 **{capital/1e4:.0f} 万元** 假设换算："
         "`目标手数 = ⌊目标权重 × 本金 ÷ 价 ÷ 100⌋`（1 手 = 100 股，向下取整），"
         "`占用资金 = 目标手数 × 100 × 价`。目标手数/占用为该期**调仓后应持有的目标量**"
@@ -641,8 +668,8 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
         "> **原因口径**：「原因」为该动作在**同期截面**的信号——三支柱为**行业内中性 z**"
         "（相对同行标准差，过 AND 门需各柱 z≥0 即跑赢行业均值），排名越小越优。"
         f"{'（未记录因子面板，如需原因需以 with_panel=True 重跑）' if not _by else ''}", "",
-        "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 收益 | 目标手数 | 占用资金(元) | 原因 |",
-        "|--------|------|------|------|------|---------|---------|------|--------|------|---------|------------|------|",
+        "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 收益(后复权) | 目标手数 | 占用资金(元) | 原因 |",
+        "|--------|------|------|------|------|---------|---------|------|--------|------------|---------|------------|------|",
     ]
     for blk in ledger:
         d = pd.to_datetime(blk["date"]).date().isoformat()
@@ -695,7 +722,7 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
             if tot_w > 1e-9:
                 avg = tot_wr / tot_w
                 lines.append(f"> 合计权重 {tot_w:.1%}，加权平均持有收益 **{avg:+.1%}**"
-                             f"（基于真实不复权价，不含分红再投）")
+                             f"（后复权口径，含分红再投，与净值一致）")
     seen = {}
     for blk in ledger:
         for r in blk["trades"]:
