@@ -106,17 +106,23 @@ def score_factors(metrics: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         df[f"{pillar}_pct"] = pct_in.where(scorable, pct_all)
 
     # ---------------------------------------------------- AND 门槛
+    # 门槛从「行业内百分位 ≥30」改为「行业内中性 z ≥ z_threshold（默认 0）」：
+    #  ① 行业内 pct 只在行业内可比——不同行业样本量下 pct 阶梯分辨率不同（5 只=20/40/60/80/100、
+    #     20 只则细密得多），拿它做跨行业总分排序会让分数尺度不可比；
+    #  ② z 是「相对同行多少个标准差」，跨行业可比、且保留领先幅度（A 领先 3σ 与 B 微弱第一不再同分）。
+    #     z≥0 即「每柱都跑赢行业典型（中位）」，AND 门取三者同时满足。
+    zthr = fcfg.get("z_threshold", 0.0)
     gate = pd.Series(True, index=df.index)
     for pillar in pillars:
-        pct = df[f"{pillar}_pct"]
-        gate &= pct.isna() | (pct >= floor)
-    df["passes_gate"] = gate & df["value_pct"].notna()
+        z = df[f"{pillar}_z"]
+        gate &= z.isna() | (z >= zthr)
+    df["passes_gate"] = gate & df["value_z"].notna()
 
-    # ---------------------------------------------------- 加权总分
+    # ---------------------------------------------------- 加权总分（z 尺度，跨行业可比）
     total = (
-        weights.get("value", 0.4) * df["value_pct"].fillna(0)
-        + weights.get("quality", 0.4) * df["quality_pct"].fillna(0)
-        + weights.get("safety", 0.2) * df["safety_pct"].fillna(0)
+        weights.get("value", 0.4) * df["value_z"].fillna(0.0)
+        + weights.get("quality", 0.4) * df["quality_z"].fillna(0.0)
+        + weights.get("safety", 0.2) * df["safety_z"].fillna(0.0)
     )
 
     # A股反转倾斜（默认关闭；开启前必须先在样本外验证）
@@ -124,7 +130,7 @@ def score_factors(metrics: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     if tilt.get("enabled", False) and "ret_52w" in df.columns:
         rz = _zscore_within(-pd.to_numeric(df["ret_52w"], errors="coerce"),
                             df["industry"], winsor)
-        total = total * (1 - tilt.get("weight", 0.05)) + rz * tilt.get("weight", 0.05) * 100
+        total = total * (1 - tilt.get("weight", 0.05)) + rz * tilt.get("weight", 0.05)
 
     df["total_score"] = total
     df = df.sort_values("total_score", ascending=False, na_position="last")

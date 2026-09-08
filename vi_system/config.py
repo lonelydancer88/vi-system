@@ -69,6 +69,16 @@ class Config:
             node[last] = node[last] * (1.0 + factor)
         return new
 
+    def with_value(self, dotted: str, value: Any) -> "Config":
+        """返回新 Config，将 dotted 路径的叶子设为 value（中间节点不存在则创建）。"""
+        new = Config(copy.deepcopy(self._data), self.path)
+        parts = dotted.split(".")
+        node = new._data
+        for p in parts[:-1]:
+            node = node.setdefault(p, {})
+        node[parts[-1]] = value
+        return new
+
     def to_dict(self) -> dict:
         return copy.deepcopy(self._data)
 

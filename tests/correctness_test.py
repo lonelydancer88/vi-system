@@ -178,34 +178,41 @@ def test_vetoes():
 
 # ================================================================ L4 三支柱 AND 门
 def test_factors():
-    print("\n[4] L4 三支柱 AND 门 + 总分权重")
+    print("\n[4] L4 三支柱 AND 门 + 总分权重（z 语义）")
     cfg = load_config()
-    floor = cfg.section("factors").get("percentile_floor", 30)
 
-    # 单行业 6 只：A 价值极差（其余优质）→ A 应因 value<floor 被挡
+    # 单行业 6 只：V0 价值极差；V1 全面最优；V2..V5 普通。
+    # z 语义：过 AND 门需三柱 z 都 ≥0（跑赢行业典型）；行业内完全同质时无人能过。
     rows = []
     for i in range(6):
         if i == 0:
             rows.append(clean_factor_row(f"V{i}", industry="白酒",
                                          ep=0.001, bp=0.01, cfp=0.001, ebit_ev=0.001, dividend_yield=0.001))
+        elif i == 1:
+            rows.append(clean_factor_row(
+                f"V{i}", industry="白酒",
+                ep=0.20, bp=2.0, cfp=0.20, ebit_ev=0.20, dividend_yield=0.05,  # 更便宜
+                gpa=0.70, roic=0.30, accruals=-0.10, profit_growth_5y=0.20, net_payout=0.06,  # 更赚钱
+                interest_coverage=20.0, net_debt_ebitda=-1.0,                   # 更安全
+                earnings_volatility=0.02, revenue_volatility=0.01))
         else:
             rows.append(clean_factor_row(f"V{i}", industry="白酒"))
     df = pd.DataFrame(rows)
     scored = factors.score_factors(df, cfg)
     a = scored[scored["code"] == "V0"].iloc[0]
-    check(f"价值垫底股 value_pct<{floor}（AND 门触发）", a["value_pct"] < floor, f"{a['value_pct']:.1f}")
+    check("价值垫底股 value_z<0（行业内最贵）", a["value_z"] < 0, f"{a['value_z']:.2f}")
     check("价值垫底股 passes_gate=False", not bool(a["passes_gate"]))
     b = scored[scored["code"] == "V1"].iloc[0]
-    check("全优股 passes_gate=True", bool(b["passes_gate"]))
-    check("全优股三支柱均>=floor",
-          b["value_pct"] >= floor and b["quality_pct"] >= floor and b["safety_pct"] >= floor)
+    check("全面最优股 passes_gate=True", bool(b["passes_gate"]))
+    check("全面最优股三支柱 z 均 >=0（跑赢行业典型）",
+          b["value_z"] >= 0 and b["quality_z"] >= 0 and b["safety_z"] >= 0)
 
-    # 总分权重重构一致：total = 0.4*v + 0.4*q + 0.2*s
+    # 总分权重重构一致：total = 0.4*value_z + 0.4*quality_z + 0.2*safety_z
     w = cfg.section("factors").get("weights", {"value": 0.4, "quality": 0.4, "safety": 0.2})
-    recon = (w.get("value", 0.4) * scored["value_pct"].fillna(0)
-             + w.get("quality", 0.4) * scored["quality_pct"].fillna(0)
-             + w.get("safety", 0.2) * scored["safety_pct"].fillna(0))
-    check("总分=加权三支柱分（公式一致）",
+    recon = (w.get("value", 0.4) * scored["value_z"].fillna(0)
+             + w.get("quality", 0.4) * scored["quality_z"].fillna(0)
+             + w.get("safety", 0.2) * scored["safety_z"].fillna(0))
+    check("总分=加权三支柱 z（公式一致）",
           bool((np.abs(recon - scored["total_score"]) < 1e-6).all()))
 
     # 空表不崩
@@ -485,9 +492,9 @@ def test_real_anchors():
           scored["net_payout"].isna().all() or scored["net_payout"].isna().any())
     # 伊利(sh600887) 应被 L4 挡掉（前面已确认真实原因：GPA 增长为负）
     check("伊利(sh600887) 不在持仓（过不了 L4）", "sh600887" not in set(scored[scored["passes_gate"]]["code"]))
-    # 圆通速递(sh600233) 应为 #1
+    # z 版回归锚点：行业内中性 z 加权 top1（旧 pct 语义时该时点为圆通 #1）
     top = scored.sort_values("total_score", ascending=False).iloc[0]["code"]
-    check("圆通速递(sh600233) 为 #1  ranked", top == "sh600233", f"top={top}")
+    check("2026-09-07 总分 top1 = sz002027（分众传媒）", top == "sz002027", f"top={top}")
     # 排雷失效告警：商誉字段全缺 → 判 dead 并告警；质押在当期有快照数据 → 不判 dead
     warns = vetoes.warn_dead_rules(scored, cfg)
     joined = " ".join(warns)

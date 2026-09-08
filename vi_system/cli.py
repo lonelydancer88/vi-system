@@ -152,17 +152,24 @@ def cmd_portfolio(args):
 def cmd_backtest(args):
     cfg = _cfg(args.config)
     st = _store(args.db)
+    skip_empty = not args.keep_empty
+    mh = getattr(args, "max_holdings", None)
+    tag = f"-top{mh}" if mh else ""
     if args.split:
+        if mh:
+            print("[warn] --max-holdings 与 --split 不兼容，已忽略（split 用配置默认持仓数）")
         res = bt.split_sample(st, cfg)
         print(bt.backtest_report(res))
         _write(bt.backtest_report(res), Path(args.out), "backtest-split.md")
     else:
-        r = bt.run_backtest(st, cfg, args.start, args.end, label=args.label)
+        r = bt.run_backtest(st, cfg, args.start, args.end,
+                            label=args.label, skip_empty=skip_empty,
+                            max_holdings=mh)
         if r.get("error"):
             print("回测失败：", r["error"])
             return
         print(bt.backtest_report({"full": r}))
-        _write(bt.backtest_report({"full": r}), Path(args.out), "backtest.md")
+        _write(bt.backtest_report({"full": r}), Path(args.out), f"backtest{tag}.md")
 
     # 指数基准对比（如 --benchmark sh000300）
     if args.benchmark:
@@ -171,11 +178,44 @@ def cmd_backtest(args):
         try:
             rep = bt.compare_benchmarks(
                 st, cfg, args.start, args.end,
-                index_code=args.benchmark, index_name=idx_name)
+                index_code=args.benchmark, index_name=idx_name,
+                max_holdings=mh)
             print("\n" + rep)
-            _write(rep, Path(args.out), "backtest-hs300.md")
+            _write(rep, Path(args.out), f"backtest-hs300{tag}.md")
         except Exception as e:
             print("[warn] 指数基准对比失败：", e)
+
+
+def cmd_trades(args):
+    cfg = _cfg(args.config)
+    st = _store(args.db)
+    mh = getattr(args, "max_holdings", None)
+    tag = f"-top{mh}" if mh else ""
+    r = bt.run_backtest(st, cfg, args.start, args.end, label="full",
+                        max_holdings=mh, with_panel=True)
+    if r.get("error"):
+        print("回测失败：", r["error"])
+        return
+    rep = bt.trade_report(r, st, top_n=args.top,
+                          capital=getattr(args, "capital", 1_000_000.0))
+    print(rep)
+    _write(rep, Path(args.out), f"trades{tag}.md")
+
+
+def cmd_reasons(args):
+    """逐期调仓原因：需要 with_panel=True 的重跑（记录每期因子面板）。"""
+    cfg = _cfg(args.config)
+    st = _store(args.db)
+    mh = getattr(args, "max_holdings", None)
+    tag = f"-top{mh}" if mh else ""
+    r = bt.run_backtest(st, cfg, args.start, args.end, label="full",
+                        max_holdings=mh, with_panel=True)
+    if r.get("error"):
+        print("回测失败：", r["error"])
+        return
+    rep = bt.trade_reasons_report(r, st, top_n=getattr(args, "top", 0))
+    print(rep)
+    _write(rep, Path(args.out), f"reasons{tag}.md")
 
 
 def cmd_fetch_index(args):
@@ -277,8 +317,32 @@ def main(argv=None):
     b.add_argument("--label", default="full")
     b.add_argument("--benchmark", default=None,
                    help="指数基准代码（如 sh000300），生成双基准对比报告")
+    b.add_argument("--max-holdings", type=int, default=None,
+                   help="把组合持股上限压到 N 只（高集中度实验，自动放宽单票/行业上限）")
+    b.add_argument("--keep-empty", action="store_true",
+                   help="保留期初空仓期（默认剔除，从首个有持仓的调仓日起算）")
     b.add_argument("--out", default=str(DEFAULT_OUT))
     b.set_defaults(func=cmd_backtest)
+
+    t = sub.add_parser("trades", help="输出逐次调仓的买卖台账")
+    t.add_argument("--start", default="2013-01-01")
+    t.add_argument("--end", default="2026-12-31")
+    t.add_argument("--top", type=int, default=12, help="每期最多展示的买卖笔数（0=全部）")
+    t.add_argument("--max-holdings", type=int, default=None,
+                   help="以 N 只持股上限的回测结果生成台账（如 3）")
+    t.add_argument("--capital", type=float, default=1_000_000.0,
+                   help="本金假设（元），用于把目标权重换算成手数/占用资金（默认 100 万）")
+    t.add_argument("--out", default=str(DEFAULT_OUT))
+    t.set_defaults(func=cmd_trades)
+
+    rs = sub.add_parser("reasons", help="输出逐期调仓原因（基于每期因子面板）")
+    rs.add_argument("--start", default="2013-01-01")
+    rs.add_argument("--end", default="2026-12-31")
+    rs.add_argument("--top", type=int, default=0, help="每期最多展示的变动笔数（0=全部）")
+    rs.add_argument("--max-holdings", type=int, default=None,
+                    help="以 N 只持股上限的回测结果生成（如 3）")
+    rs.add_argument("--out", default=str(DEFAULT_OUT))
+    rs.set_defaults(func=cmd_reasons)
 
     fi = sub.add_parser("fetch-index", help="抓取并存储指数日线（如沪深300 sh000300）")
     fi.add_argument("--code", default="sh000300", help="指数代码，需带市场前缀")

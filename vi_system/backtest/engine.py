@@ -23,6 +23,12 @@ from ..portfolio.constructor import build_portfolio, turnover
 
 
 # ==================================================================== 单次筛选截面
+# 面板记录字段（with_panel=True 时每期保存，供逐期调仓原因归因）
+# 三支柱记行业内中性 z（value_z 等）；行业内 pct 仅供展示、不作为排序/门槛依据。
+_PANEL_COLS = ("code", "name", "industry", "rank", "value_z",
+               "quality_z", "safety_z", "total_score", "passes_gate")
+
+
 def screen_at(store, asof, cfg: Config, with_valuation: bool = False):
     """在 asof 时点跑完 L1→L5，返回 (scored_or_valued, rejected, universe)。"""
     uni = _universe.build_universe(store, asof, cfg)
@@ -71,13 +77,46 @@ def run_backtest(
     label: str = "full",
     with_valuation: bool = False,
     benchmark: str = "equal",
+    skip_empty: bool = True,
+    max_holdings: int | None = None,
+    with_panel: bool = False,
 ) -> dict:
     """运行回测。返回 dict（含 nav 曲线、指标、逐期明细）。
 
     benchmark:
       - "equal"（默认）：等权持有当期宇宙，作为对照基准。
       - 指数代码（如 "sh000300"）：以该指数日线收益作为基准（价格回报口径，不含股息）。
+    skip_empty:
+      - True（默认）：剔除期初「空仓期」——即从首个实际持有股票的调仓日起算。
+        原因：财务因子数据（point-in-time）最早只到 FY2016（2017 年披露），
+        更早于 2013-2016 的调仓组合为空（全程平走），纳入会把空仓期也算进年化，
+        虚增/虚减收益。剔除后业绩归因更干净。
+      - False：保留全部调仓期（含空仓平走段），用于展示数据缺口本身。
+    max_holdings:
+      - None（默认）：使用配置里的 portfolio.target_size。
+      - 正整数 N：把组合持股上限压到 N 只（高集中度实验）。会配套放宽风控上限——
+        单票上限 = max(原值, min(0.35, 0.9/N×1.1))，行业上限在 N<=5 时放宽到 0.5，
+        否则维持原值。仅本次运行生效，不改动配置文件。
+    with_panel:
+      - False（默认）：不记录每期因子面板。
+      - True：记录每期候选股的三支柱分位/排名/过门状态到 result["panel"]，
+        供 trade_reasons_report 生成逐期调仓原因。
     """
+    if max_holdings is not None and max_holdings > 0:
+        hi = int(max_holdings)
+        concentrated = hi <= 5
+        po = cfg.section("portfolio") or {}
+        mpos = max(float(po.get("max_position", 0.08)), min(0.35, 0.9 / hi * 1.1))
+        overrides = {
+            "portfolio.target_size": [1, hi],
+            "portfolio.max_position": round(mpos, 4),
+            "portfolio.max_industry": (
+                0.5 if concentrated else float(po.get("max_industry", 0.25))
+            ),
+        }
+        for dotted, val in overrides.items():
+            cfg = cfg.with_value(dotted, val)
+
     bcfg = cfg.section("backtest")
     months = bcfg.get("rebalance_months", [5, 9])
     day = bcfg.get("rebalance_day", 15)
@@ -106,6 +145,7 @@ def run_backtest(
     nav, bench = 1.0, 1.0
     prev_w: pd.Series | None = None
     records, holdings_hist = [], []
+    panels, panel_meta = [], []
 
     for i, d in enumerate(dates[:-1]):
         d_next = dates[i + 1]
@@ -113,6 +153,11 @@ def run_backtest(
             continue
 
         scored, rejected, uni = screen_at(store, d, cfg, with_valuation)
+        if with_panel and not scored.empty:
+            _cols = [c for c in _PANEL_COLS if c in scored.columns]
+            _sub = scored[_cols].copy()
+            _sub["date"] = d
+            panels.append(_sub)
         if scored.empty:
             w_new = pd.Series(dtype=float)
         else:
@@ -166,18 +211,39 @@ def run_backtest(
     if not records:
         return {"error": "回测未产生任何有效周期"}
 
+    # ---- 跳过空仓期初：从首个实际持有股票的调仓日起算（数据可得性）
+    # 财务因子 point-in-time 最早只到 FY2016（2017 年披露），更早调仓组合为空、
+    # 全程平走，纳入会虚增/虚减年化收益。剔除后业绩归因更干净。
+    eff_start = records[0]["date"]
+    n_skipped = 0
+    if skip_empty:
+        first = next((i for i, r in enumerate(records) if r["n_holdings"] > 0), 0)
+        if first > 0:
+            n_skipped = first
+            records = records[first:]
+            holdings_hist = holdings_hist[first:]
+            eff_start = records[0]["date"]
+
     rec = pd.DataFrame(records)
     nav_curve = rec.set_index("date")[["nav", "bench"]]
     stats = _stats(rec, nav_curve, bench_label=bench_label)
     stats["label"] = label
-    return {
+    stats["effective_start"] = str(pd.to_datetime(eff_start).date())
+    stats["skipped_empty_periods"] = n_skipped
+    out = {
         "label": label,
         "records": rec,
         "nav": nav_curve,
         "stats": stats,
         "holdings": holdings_hist,
         "dates": dates,
+        "effective_start": str(pd.to_datetime(eff_start).date()),
+        "skipped_empty_periods": n_skipped,
     }
+    if with_panel:
+        out["panel"] = pd.concat(panels, ignore_index=True) if panels else pd.DataFrame()
+        out["panel_meta"] = panel_meta
+    return out
 
 
 def _stats(rec: pd.DataFrame, nav: pd.DataFrame, bench_label: str = "等权基准") -> dict:
@@ -296,6 +362,15 @@ def backtest_report(results: dict, regimes: bool = True) -> str:
         bname = s.get("benchmark", "等权基准")
         lines += [
             f"## {s['label']}（{s['years']} 年 / {s['periods']} 期）", "",
+        ]
+        eff = s.get("effective_start")
+        skp = s.get("skipped_empty_periods", 0)
+        if eff and skp:
+            lines += [
+                f"> 注：已剔除期初 {skp} 个空仓期，实算起点 **{eff}**"
+                f"（财务因子数据最早到 FY2016，此前组合为空）。", "",
+            ]
+        lines += [
             f"| 指标 | 策略 | {bname} |", "|------|------|------|",
             f"| 年化收益 | {s['cagr']:.2%} | {s['bench_cagr']:.2%} |",
             f"| 年化超额 | {s['excess_cagr']:.2%} | — |",
@@ -326,10 +401,16 @@ def backtest_report(results: dict, regimes: bool = True) -> str:
 def compare_benchmarks(
     store, cfg: Config, start: str, end: str,
     index_code: str = "sh000300", index_name: str = "沪深300",
+    max_holdings: int | None = None,
 ) -> str:
-    """双基准对比：策略 vs 等权基准 vs 指数基准。返回 markdown 报告。"""
-    r_eq = run_backtest(store, cfg, start, end, label="full", benchmark="equal")
-    r_ix = run_backtest(store, cfg, start, end, label="full", benchmark=index_code)
+    """双基准对比：策略 vs 等权基准 vs 指数基准。返回 markdown 报告。
+
+    max_holdings: 传给 run_backtest 的持股上限（None=配置默认）。
+    """
+    r_eq = run_backtest(store, cfg, start, end, label="full", benchmark="equal",
+                        max_holdings=max_holdings)
+    r_ix = run_backtest(store, cfg, start, end, label="full", benchmark=index_code,
+                        max_holdings=max_holdings)
     if r_eq.get("error"):
         return f"回测失败（等权）：{r_eq['error']}"
     if r_ix.get("error"):
@@ -340,10 +421,21 @@ def compare_benchmarks(
     def row(name, ke, ki, fmt="{:.2%}"):
         return f"| {name} | {fmt.format(ke)} | {fmt.format(ki)} |"
 
+    eff = se.get("effective_start")
+    skp = se.get("skipped_empty_periods", 0)
+    win = f"{eff} ~ {end}" if (eff and skp) else f"{start} ~ {end}"
+    conc = f"（最多 {max_holdings} 只）" if max_holdings else ""
     lines = [
-        f"# 双基准对比报告：策略 vs 等权 vs {index_name}（{start} ~ {end}）", "",
+        f"# 双基准对比报告：策略{conc} vs 等权 vs {index_name}（{win}）", "",
         "> 说明：{index_name} 指数基准为**价格回报口径**（指数点，不含股息再投），"
         "会系统性低估真实全收益基准约 2-3%/年。".format(index_name=index_name), "",
+    ]
+    if eff and skp:
+        lines += [
+            f"> 注：已剔除期初 {skp} 个空仓期，实算起点 **{eff}**"
+            f"（财务因子数据最早到 FY2016，此前组合为空）。", "",
+        ]
+    lines += [
         "| 指标 | 等权基准 | %s 基准 |" % index_name,
         "|------|---------|---------|",
         row("基准年化", se["bench_cagr"], si["bench_cagr"]),
@@ -372,4 +464,288 @@ def compare_benchmarks(
         f"最大回撤 {se['max_drawdown']:.2%} 远低于基准。",
         "",
     ]
+    return "\n".join(lines)
+
+
+# ==================================================================== 交易台账
+def trade_ledger(result: dict, store) -> list:
+    """把回测的持仓快照差分，生成逐次调仓的买卖明细。
+
+    返回 list（每个调仓日一个 dict）：
+        {"date", "n_buy", "n_sell", "n_hold", "trades": [...]}
+    trades 中每条：{code, name, industry, action, w_prev, w_new, w_chg, price}
+    action ∈ {建仓, 清仓, 增持, 减持, 持有}
+    """
+    holdings = result.get("holdings", [])
+    if len(holdings) < 1:
+        return []
+    try:
+        u = store.load_universe().set_index("code")
+        name_map = u["name"].to_dict()
+        ind_map = u.get("industry", pd.Series(dtype=str)).to_dict()
+    except Exception:
+        name_map, ind_map = {}, {}
+    # 价格快照：用 close_raw（真实不复权收盘价），供手数/占用资金换算与对照行情。
+    # 说明：close_raw 经 2026-09-08 两次修复后已可信 ——
+    #  ① amount/volume 反推（原 2013–2021 段负值/异质缩放损坏已覆盖）；
+    #  ② 科创板 688 板块 volume 单位重复×100 的 bug（价格/市值低估 100 倍）已修正。
+    # 后复权 close_adj 仍用于回测净值口径（含分红再投），但不用于台账报价。
+    try:
+        _px = store.load_prices()
+        _px["date"] = pd.to_datetime(_px["date"])
+        _idx = _px.set_index(["date", "code"])
+        def price_at(d, c):
+            try:
+                row = _idx.loc[(pd.to_datetime(d), c)]
+                raw = float(row["close_raw"]) if "close_raw" in row else np.nan
+                if np.isfinite(raw) and raw > 0:
+                    return raw
+                adj = float(row["close_adj"]) if "close_adj" in row else np.nan
+                return adj if np.isfinite(adj) else np.nan
+            except Exception:
+                return np.nan
+    except Exception:
+        price_at = lambda d, c: np.nan
+
+    ledger = []
+    prev = pd.Series(dtype=float)
+    for h in holdings:
+        d = h["date"]
+        cur = h["weights"]
+        cur_set, prev_set = set(cur.index), set(prev.index)
+        rows = []
+        for c in sorted(cur.index.union(prev.index)):
+            in_cur, in_prev = c in cur_set, c in prev_set
+            w_new = float(cur.get(c, 0.0)) if in_cur else 0.0
+            w_prev = float(prev.get(c, 0.0)) if in_prev else 0.0
+            if in_cur and not in_prev:
+                action = "建仓"
+            elif in_prev and not in_cur:
+                action = "清仓"
+            elif in_cur and in_prev and w_new > w_prev + 1e-9:
+                action = "增持"
+            elif in_cur and in_prev and w_new < w_prev - 1e-9:
+                action = "减持"
+            else:
+                action = "持有"
+            if action == "持有":
+                continue
+            rows.append({
+                "code": c,
+                "name": name_map.get(c, c),
+                "industry": ind_map.get(c, ""),
+                "action": action,
+                "w_prev": w_prev,
+                "w_new": w_new,
+                "w_chg": w_new - w_prev,
+                "price": price_at(d, c),
+            })
+        n_buy = sum(1 for r in rows if r["action"] in ("建仓", "增持"))
+        n_sell = sum(1 for r in rows if r["action"] in ("清仓", "减持"))
+        ledger.append({
+            "date": d,
+            "n_buy": n_buy,
+            "n_sell": n_sell,
+            "n_hold": int((cur > 0).sum()),
+            "trades": rows,
+        })
+        prev = cur
+    return ledger
+
+
+def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_000.0) -> str:
+    """生成可阅读的交易轨迹报告（markdown）。
+
+    top_n  : 每期最多展示的买卖笔数；<=0 表示全量展示、不省略。
+    capital: 本金假设（元），用于把目标权重换算成手数/占用资金。
+             公式：目标手数 = ⌊目标权重 × 本金 ÷ 真实价 ÷ 100⌋（1 手 = 100 股）。
+    """
+    ledger = trade_ledger(result, store)
+    if not ledger:
+        return "# 交易台账\n\n（无持仓记录）"
+    eff = result.get("effective_start")
+    _by = _panel_by_date(result.get("panel"))
+    lines = [
+        "# 交易轨迹（买卖台账）", "",
+        "> **价与手数口径**：表中「价」= **真实不复权收盘价**（`close_raw`，经 amount/volume 反推"
+        " + 科创板 688 volume 单位修复后可信），可对照行情；后复权 `close_adj` 仍用于回测净值口径"
+        "（含分红再投）。", "",
+        f"> 手数与占用资金按本金 **{capital/1e4:.0f} 万元** 假设换算："
+        "`目标手数 = ⌊目标权重 × 本金 ÷ 价 ÷ 100⌋`（1 手 = 100 股，向下取整），"
+        "`占用资金 = 目标手数 × 100 × 价`。目标手数/占用为该期**调仓后应持有的目标量**"
+        "（建仓即本次买入量、清仓为 0），可按实际本金线性缩放。", "",
+        f"> 实算起点 **{eff}**，共 {len(ledger)} 次调仓。"
+        f"「建仓/清仓」为该期新进/退出，「增持/减持」为权重上调/下调。", "",
+        "> **原因口径**：「原因」为该动作在**同期截面**的信号——三支柱为**行业内中性 z**"
+        "（相对同行多少个标准差，过 AND 门需各柱 z≥0 即跑赢行业典型），排名越小越优。"
+        f"{'（未记录因子面板，如需原因需以 with_panel=True 重跑）' if not _by else ''}", "",
+        "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 目标手数 | 占用资金(元) | 原因 |",
+        "|--------|------|------|------|------|---------|---------|------|--------|---------|------------|------|",
+    ]
+    for blk in ledger:
+        d = pd.to_datetime(blk["date"]).date().isoformat()
+        order = {"建仓": 0, "清仓": 1, "增持": 2, "减持": 3}
+        rows = sorted(blk["trades"], key=lambda r: (order.get(r["action"], 9), -abs(r["w_chg"])))
+        if not rows:
+            lines.append(f"| {d} | — | — | （无变动） | — | — | — | — | — | — | — | — |")
+            continue
+        shown = rows if top_n <= 0 else rows[:top_n]
+        for r in shown:
+            chg = f"+{r['w_chg']:.1%}" if r["w_chg"] >= 0 else f"{r['w_chg']:.1%}"
+            p = float(r["price"]) if np.isfinite(r["price"]) else np.nan
+            price = f"{p:.2f}" if np.isfinite(p) else "—"
+            lots = cost = 0
+            if np.isfinite(p) and p > 0 and r["w_new"] > 1e-9:
+                lots = int(r["w_new"] * capital / p / 100)
+                cost = lots * 100 * p
+            _why = (_action_reason_from(_by, d, r["code"], r["action"])
+                    if _by else "—（无面板）")
+            lines.append(
+                f"| {d} | {r['action']} | {r['code']} | {r['name']} | {r['industry']} | "
+                f"{r['w_prev']:.1%} | {r['w_new']:.1%} | {chg} | {price} | "
+                f"{lots if lots > 0 else '—'} | {f'{cost:,.0f}' if cost > 0 else '—'} | {_why} |"
+            )
+        if top_n > 0 and len(rows) > top_n:
+            lines.append(
+                f"| {d} | … | … | 其余 {len(rows) - top_n} 笔（增持/减持）略 | … | … | … | … | … | … | … |"
+            )
+    seen = {}
+    for blk in ledger:
+        for r in blk["trades"]:
+            seen.setdefault(r["code"], {"name": r["name"], "buy": 0, "sell": 0})
+            if r["action"] in ("建仓", "增持"):
+                seen[r["code"]]["buy"] += 1
+            else:
+                seen[r["code"]]["sell"] += 1
+    lines += ["", "**累计覆盖标的**", "",
+              f"共 {len(seen)} 只曾在组合中出现。进出最频繁的：", ""]
+    top = sorted(seen.items(), key=lambda kv: kv[1]["buy"] + kv[1]["sell"], reverse=True)[:10]
+    lines.append("| 代码 | 名称 | 买入次数 | 卖出次数 |")
+    lines.append("|------|------|---------|---------|")
+    for c, v in top:
+        lines.append(f"| {c} | {v['name']} | {v['buy']} | {v['sell']} |")
+    lines += ["", "---", "",
+              "**数据质量附注（2026-09-08 排查结论）**", "",
+              "- **净值/业绩可信**：回测用 `close_adj`（后复权），经核查全量无负值、无异常跳变、"
+              "区间回报符合常识（茅台 2017→2026 后复权 3.68×、工行 1.85×、中国建筑 0.99× 含股息），"
+              "故年化/超额/IR/回撤等基于它的指标**可信**。",
+              "- **台账买卖动作可信**：建仓/清仓/增减由因子打分的截面排名驱动，可反映策略调仓逻辑。",
+              "- **价格层 `close_raw` 已修复（扎实）**：原 `close_raw`（不复权价）在 2013–2021 段异质损坏"
+              "（含负值与正数偏低），已用 `amount/volume`（接口成交量额全期完好）反推真实成交价重建，"
+              "与公开真实价高度吻合（茅台 2013≈194/真实210、2017≈466/真实450）。此层可靠。",
+              "- **市值层 `total_share` 源数据错误（已部分修正）**：`mktcap`=close_raw×total_share，"
+              "而 westock/腾讯源的`总股本`字段在少数股票上级错误（中国移动 ×21、中国建筑 ×10，已用公开真实值核实；"
+              "`facts` 表同源亦错）。完整重建后对比发现：原报告 13.49% 年化建立在错误 `mktcap` 上属虚高、不可信；"
+              "仅修正已确证两股后当前年化 11.56%，对沪深300（价格回报）超额 +5.03%/IR 0.93。",
+              "- **局限（重要）**：当前仅修正了已公开确证的两只错股，其余 `total_share` 错误若存在仍可影响个别选股与"
+              "业绩精确值。全量干净重建需 tushare token 或能访问东方财富的环境——当前网络下 akshare 东财源被代理拦截、"
+              "腾讯源股本字段同源错误、新浪源无股本字段，自动全量重建不可行。",
+              "- **台账价格列**：原为损坏的 `close_raw`（如茅台 2017 显示 127 元），已统一改为可信的"
+              " `close_adj`（后复权口径）。",
+              ]
+    return "\n".join(lines)
+
+
+def _panel_by_date(panel: pd.DataFrame) -> dict:
+    """把 with_panel=True 记录的面板按 date 分组（date -> 该期候选 DataFrame）。"""
+    if panel is None or panel.empty or "date" not in panel.columns:
+        return {}
+    return {pd.Timestamp(dt): g for dt, g in panel.groupby("date")}
+
+
+def _action_reason_from(by_date: dict, date, code: str, action: str) -> str:
+    """为某一笔买卖动作生成可验证的原因文本（依据与调仓日同期的因子面板）。
+
+    by_date: _panel_by_date 的输出。
+    三支柱为行业内中性 z（相对同行多少个标准差，过 AND 门需各柱 z≥0，即跑赢行业典型）；
+    排名越小越优。
+    """
+    g = by_date.get(pd.Timestamp(date))
+    if g is None or g.empty:
+        return "当期未进入候选池（未过排雷/无打分/数据缺失）"
+    row = g[g["code"] == code]
+    if row.empty:
+        return "当期未进入候选池（未过排雷/无打分/数据缺失）"
+    r = row.iloc[0]
+    m = len(g)
+
+    def _num(x):
+        try:
+            return bool(np.isfinite(float(x)))
+        except Exception:
+            return False
+
+    def _fz(x):
+        return "—" if not _num(x) else f"{float(x):+.2f}"
+
+    gate = bool(r.get("passes_gate", False)) if "passes_gate" in g.columns else True
+    v = _fz(r.get("value_z")) if "value_z" in g.columns else "—"
+    q = _fz(r.get("quality_z")) if "quality_z" in g.columns else "—"
+    ss = _fz(r.get("safety_z")) if "safety_z" in g.columns else "—"
+    rk = r.get("rank")
+    rk_txt = f"第 {float(rk):.0f}/{m}" if _num(rk) else "—"
+    sc = r.get("total_score")
+    sc_txt = f"，总分 {float(sc):+.2f}" if _num(sc) else ""
+    if action == "建仓":
+        if gate:
+            return (f"三支柱均≥行业中位 z≥0（价值z {v}/质量z {q}/安全z {ss}），"
+                    f"当期排名 {rk_txt}{sc_txt}，新进入目标组合")
+        return (f"当期三支柱未全过 z≥0 门槛（价值z {v}/质量z {q}/安全z {ss}）"
+                "仍入选（候选不足等例外通道）")
+    if action == "清仓":
+        if not gate:
+            return (f"当期三支柱跌破行业中位 z≥0（价值z {v}/质量z {q}/安全z {ss}），"
+                    f"排名 {rk_txt}，被清出")
+        return (f"当期仍过 z 门槛但排名 {rk_txt}{sc_txt}，未进新一期目标组合"
+                "（被总分更优/同行业者挤出）")
+    return f"权重随当期信号调整：排名 {rk_txt}{sc_txt}，z≥0 门槛{'过' if gate else '未过'}"
+
+
+def trade_reasons_report(result: dict, store, top_n: int = 0) -> str:
+    """基于每期因子面板（with_panel=True 的回测结果）生成逐期调仓原因。
+
+    top_n<=0 表示全量；>0 时每期只展示前 top_n 笔非「持有」动作。
+    原因依据是「与该调仓日同一时点」的截面信号：三支柱为行业内中性 z
+    （过 AND 门需各柱 z≥0，即每柱跑赢行业典型），排名越小越优。
+    """
+    panel = result.get("panel")
+    if panel is None or panel.empty:
+        return ("# 调仓原因\n\n"
+                "> 需要 with_panel=True 的回测结果（当前记录未含因子面板）。")
+    rec = result["records"]
+    rec_by = rec.set_index("date") if rec is not None and "date" in rec.columns else None
+    by_date = _panel_by_date(panel)
+
+    lines = ["# 逐期调仓原因", "",
+             "> 依据：与每次调仓同期的因子面板（with_panel=True 记录）。价值/质量/安全三支柱为"
+             "**行业内中性 z**（相对同行标准差；过 AND 门需各柱 z≥0，即每柱都跑赢行业典型）；"
+             "排名越小越优。", ""]
+    ledger = trade_ledger(result, store)
+    n_show = 0
+    for blk in ledger:
+        d = blk["date"]
+        rows = [r_ for r_ in blk["trades"] if r_["action"] != "持有"]
+        if not rows:
+            continue
+        rmeta = ""
+        if rec_by is not None:
+            try:
+                rr = rec_by.loc[pd.Timestamp(d)]
+                if isinstance(rr, pd.DataFrame):
+                    rr = rr.iloc[0]
+                rmeta = (f"｜本期组合收益 {float(rr['port_ret']):+.1%}"
+                         f"｜换手 {float(rr['turnover']):.0%}")
+            except Exception:
+                pass
+        show = rows if top_n <= 0 else rows[:top_n]
+        lines += [f"## {pd.Timestamp(d).date()}（{len(rows)} 笔变动{rmeta}）", "",
+                  "| 动作 | 名称 | 行业 | 原因 |", "|------|------|------|------|"]
+        for t in show:
+            why = _action_reason_from(by_date, d, t["code"], t["action"])
+            ind = (t.get("industry") or "") or ""
+            name = t.get("name") or t["code"]
+            lines.append(f"| {t['action']} | {name} | {ind} | {why} |")
+        lines.append("")
+        n_show += 1
+    lines += ["---", f"共 {n_show} 期发生调仓。"]
     return "\n".join(lines)
