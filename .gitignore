@@ -1,9 +1,21 @@
-# 抓取/生成的数据库：体积大（约 90MB），且可用脚本重建，不入库
-#   tests/fetch_real.py      重新抓取真实数据（财务 + 行情）
-#   tests/build_universe.py  重建宇宙代码表
-#   python -m vi_system.cli demo   生成合成库
-# 注意：用 /data/ 锚定到仓库根，避免误伤 vi_system/data/ 源码模块
-/data/
+# 真实库 data/real_universe 已入库：其中的价格修复（close_raw 反推、688 单位修正、
+# total_share 两股修正）无法用脚本复现，必须留档。
+# 以下仍不入库：
+#   data/*/prices.parquet.bak*、prices.parquet.full   修复过程中的备份
+#   data/demo、smoke_db、correctness_db、vi_db         可用脚本重建的库
+#     python -m vi_system.cli demo   生成 demo
+#     build_demo_store()             生成 smoke_db / correctness_db
+#     tests/fetch_real.py            重抓 vi_db / real_universe
+#   data/*/*.log、smoke_decisions.jsonl                运行时日志
+/data/*/prices.parquet.bak*
+/data/*/prices.parquet.full
+/data/demo/
+/data/smoke_db/
+/data/correctness_db/
+/data/vi_db/
+/data/*.log
+/data/*/*.log
+/data/smoke_decisions.jsonl
 
 # 运行时日志
 out/*.log
