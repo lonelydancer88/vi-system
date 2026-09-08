@@ -523,6 +523,7 @@ def trade_ledger(result: dict, store) -> list:
         price_at = lambda d, c: np.nan
 
     ledger = []
+    first_cost = {}          # code -> 首次建仓真实价（跨期追踪，作为持有收益的成本基准）
     prev = pd.Series(dtype=float)
     for h in holdings:
         d = h["date"]
@@ -545,6 +546,14 @@ def trade_ledger(result: dict, store) -> list:
                 action = "持有"
             if action == "持有":
                 continue
+            price = price_at(d, c)
+            if action == "建仓" and c not in first_cost:
+                first_cost[c] = price
+            cost = first_cost.get(c)
+            ret = (price - cost) / cost if (cost is not None and np.isfinite(cost)
+                                            and np.isfinite(price) and cost > 0) else np.nan
+            if action == "清仓" and c in first_cost:
+                del first_cost[c]          # 清仓后若再建仓，成本基准重置（算完 ret 后再删）
             rows.append({
                 "code": c,
                 "name": name_map.get(c, c),
@@ -553,8 +562,27 @@ def trade_ledger(result: dict, store) -> list:
                 "w_prev": w_prev,
                 "w_new": w_new,
                 "w_chg": w_new - w_prev,
-                "price": price_at(d, c),
+                "price": price,
+                "cost": cost,
+                "ret": ret,
             })
+        # 本期完整持仓快照（含「持有」无动作股），用于报告「每只股票目前的收益」
+        snap = []
+        for c in cur.index:
+            if float(cur.get(c, 0.0)) > 0:
+                pr = price_at(d, c)
+                cost = first_cost.get(c)
+                ret = (pr - cost) / cost if (cost is not None and np.isfinite(cost)
+                                             and np.isfinite(pr) and cost > 0) else np.nan
+                snap.append({
+                    "code": c,
+                    "name": name_map.get(c, c),
+                    "industry": ind_map.get(c, ""),
+                    "price": pr,
+                    "cost": cost,
+                    "ret": ret,
+                    "w": float(cur.get(c, 0.0)),
+                })
         n_buy = sum(1 for r in rows if r["action"] in ("建仓", "增持"))
         n_sell = sum(1 for r in rows if r["action"] in ("清仓", "减持"))
         ledger.append({
@@ -563,6 +591,7 @@ def trade_ledger(result: dict, store) -> list:
             "n_sell": n_sell,
             "n_hold": int((cur > 0).sum()),
             "trades": rows,
+            "snap": snap,
         })
         prev = cur
     return ledger
@@ -594,21 +623,22 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
         "> **原因口径**：「原因」为该动作在**同期截面**的信号——三支柱为**行业内中性 z**"
         "（相对同行标准差，过 AND 门需各柱 z≥0 即跑赢行业均值），排名越小越优。"
         f"{'（未记录因子面板，如需原因需以 with_panel=True 重跑）' if not _by else ''}", "",
-        "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 目标手数 | 占用资金(元) | 原因 |",
-        "|--------|------|------|------|------|---------|---------|------|--------|---------|------------|------|",
+        "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 收益 | 目标手数 | 占用资金(元) | 原因 |",
+        "|--------|------|------|------|------|---------|---------|------|--------|------|---------|------------|------|",
     ]
     for blk in ledger:
         d = pd.to_datetime(blk["date"]).date().isoformat()
         order = {"建仓": 0, "清仓": 1, "增持": 2, "减持": 3}
         rows = sorted(blk["trades"], key=lambda r: (order.get(r["action"], 9), -abs(r["w_chg"])))
         if not rows:
-            lines.append(f"| {d} | — | — | （无变动） | — | — | — | — | — | — | — | — |")
-            continue
+            lines.append(f"| {d} | — | — | （无变动） | — | — | — | — | — | — | — | — | — |")
         shown = rows if top_n <= 0 else rows[:top_n]
         for r in shown:
             chg = f"+{r['w_chg']:.1%}" if r["w_chg"] >= 0 else f"{r['w_chg']:.1%}"
             p = float(r["price"]) if np.isfinite(r["price"]) else np.nan
             price = f"{p:.2f}" if np.isfinite(p) else "—"
+            rt = r.get("ret", np.nan)
+            ret_s = f"{rt:+.1%}" if (rt is not None and np.isfinite(rt)) else "—"
             lots = cost = 0
             if np.isfinite(p) and p > 0 and r["w_new"] > 1e-9:
                 lots = int(r["w_new"] * capital / p / 100)
@@ -617,13 +647,37 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
                     if _by else "—（无面板）")
             lines.append(
                 f"| {d} | {r['action']} | {r['code']} | {r['name']} | {r['industry']} | "
-                f"{r['w_prev']:.1%} | {r['w_new']:.1%} | {chg} | {price} | "
+                f"{r['w_prev']:.1%} | {r['w_new']:.1%} | {chg} | {price} | {ret_s} | "
                 f"{lots if lots > 0 else '—'} | {f'{cost:,.0f}' if cost > 0 else '—'} | {_why} |"
             )
         if top_n > 0 and len(rows) > top_n:
             lines.append(
-                f"| {d} | … | … | 其余 {len(rows) - top_n} 笔（增持/减持）略 | … | … | … | … | … | … | … |"
+                f"| {d} | … | … | 其余 {len(rows) - top_n} 笔（增持/减持）略 | … | … | … | … | … | … | … | … | … |"
             )
+        # —— 本期持仓收益快照：调仓时每只股票目前的收益（相对首次建仓真实价）——
+        snap = blk.get("snap", [])
+        if snap:
+            lines.append("")
+            lines.append(f"**本期持仓收益（{d}，共 {len(snap)} 只）**")
+            lines.append("| 代码 | 名称 | 行业 | 建仓价 | 当前价 | 持有收益 | 权重 |")
+            lines.append("|------|------|------|--------|--------|----------|------|")
+            tot_w = 0.0
+            tot_wr = 0.0
+            for s in sorted(snap, key=lambda x: -x["w"]):
+                cst = s.get("cost")
+                prc = s.get("price")
+                rtv = s.get("ret")
+                cst_f = f"{cst:.2f}" if (cst is not None and np.isfinite(cst)) else "—"
+                prc_f = f"{prc:.2f}" if (prc is not None and np.isfinite(prc)) else "—"
+                rtv_f = f"{rtv:+.1%}" if (rtv is not None and np.isfinite(rtv)) else "—"
+                lines.append(f"| {s['code']} | {s['name']} | {s['industry']} | {cst_f} | {prc_f} | {rtv_f} | {s['w']:.1%} |")
+                if rtv is not None and np.isfinite(rtv):
+                    tot_w += s["w"]
+                    tot_wr += s["w"] * rtv
+            if tot_w > 1e-9:
+                avg = tot_wr / tot_w
+                lines.append(f"> 合计权重 {tot_w:.1%}，加权平均持有收益 **{avg:+.1%}**"
+                             f"（基于真实不复权价，不含分红再投）")
     seen = {}
     for blk in ledger:
         for r in blk["trades"]:
