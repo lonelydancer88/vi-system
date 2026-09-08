@@ -192,7 +192,7 @@ def cmd_trades(args):
     mh = getattr(args, "max_holdings", None)
     tag = f"-top{mh}" if mh else ""
     r = bt.run_backtest(st, cfg, args.start, args.end, label="full",
-                        max_holdings=mh, with_panel=True)
+                        max_holdings=mh, with_panel=True, with_valuation=True)
     if r.get("error"):
         print("回测失败：", r["error"])
         return
@@ -209,7 +209,7 @@ def cmd_reasons(args):
     mh = getattr(args, "max_holdings", None)
     tag = f"-top{mh}" if mh else ""
     r = bt.run_backtest(st, cfg, args.start, args.end, label="full",
-                        max_holdings=mh, with_panel=True)
+                        max_holdings=mh, with_panel=True, with_valuation=True)
     if r.get("error"):
         print("回测失败：", r["error"])
         return

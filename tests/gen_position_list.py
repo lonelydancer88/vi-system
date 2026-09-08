@@ -78,14 +78,22 @@ def main():
     asof = str(pd.read_parquet(f"{args.db}/prices.parquet")["date"].max().date())
     scored, rejected, uni = bt.screen_at(st, asof, cfg, with_valuation=True)
     quotes = fetch_quotes(sorted(set(scored["code"])))
-    zcols = [c for c in ("value_z", "quality_z", "safety_z", "rank") if c in scored.columns]
-    zmap = scored.set_index("code")[zcols].to_dict("index")
+    l4cols = [c for c in ("value_z", "quality_z", "safety_z", "rank") if c in scored.columns]
+    l5cols = [c for c in ("v_mid", "buy_point", "sell_point", "verdict", "g_implied")
+              if c in scored.columns]
+    zmap = scored.set_index("code")[l4cols].to_dict("index")
+    vmap = scored.set_index("code")[l5cols].to_dict("index")
 
     L = [f"# 建仓清单（数据截至 {asof} 收盘）", "",
          f"> 选股信号 `screen_at(asof={asof})`：宇宙 **{len(uni)}** → 排雷后 **{len(scored)}** "
          f"→ 过 AND 门 **{int(scored['passes_gate'].sum())}**。",
          "> 价格取腾讯行情当日**真实收盘价**（非库内 close_raw）；手数按 1 手=100 股向下取整。",
-         f"> 本金 {args.capital:,.0f} 元。"]
+         f"> 本金 {args.capital:,.0f} 元。",
+         "> **分数**：价值/质量/安全z = L4 行业内中性 z（>0 即跑赢同行）；总分 = 加权 z。"
+         "**估值(L5)**：v_mid = 两阶段 DCF 三情景中位数（买点=v_mid×0.70、卖点=v_mid×1.50，单位：亿元）；"
+         "隐含g = 市场价反解的永续增长率；「判定」为 已到买点/合理区间/已到卖点。",
+         "> **估值局限**：经营现金流（ocf−capex）缺失时用净利润×80% 兜底（估值失真，对银行/地产等"
+         "现金流结构与利润差异大的行业尤甚）；故估值列仅供参考，买入前需人工复核现金流。"]
     for h in args.holdings.split(","):
         hi = None if h.strip() in ("", "none") else int(h)
         c, tag = mkcfg(cfg, hi)
@@ -101,16 +109,36 @@ def main():
         d["手数"] = (d["weight"] * args.capital / d["价"] / 100).fillna(0).astype(int)
         d["占用"] = d["手数"] * 100 * d["价"]
         for z in ("value_z", "quality_z", "safety_z", "rank"):
-            if z in zcols:
+            if z in l4cols:
                 d[z] = d["code"].map(lambda x: zmap.get(x, {}).get(z, np.nan))
+        for z in ("v_mid", "buy_point", "sell_point", "g_implied"):
+            if z in l5cols:
+                d[z] = d["code"].map(lambda x: vmap.get(x, {}).get(z, np.nan))
+        if "verdict" in l5cols:
+            d["verdict"] = d["code"].map(lambda x: vmap.get(x, {}).get("verdict", ""))
         L += ["---", "", f"## {tag}：{len(d)} 只，现金 {max(0.0, 1-pf['weight'].sum()):.1%}", "",
-              "| # | 代码 | 名称 | 行业 | 权重 | 总分 | 价值z | 质量z | 安全z | 排名 | 收盘价 | 涨跌 | 手数 | 占用(元) |",
-              "|---|------|------|------|------|------|-------|-------|-------|------|-------|------|------|---------|"]
+              "| # | 代码 | 名称 | 行业 | 权重 | 总分 | 价值z | 质量z | 安全z | 排名 | "
+              "v_mid(亿) | 买点(亿) | 卖点(亿) | 判定 | 隐含g | 收盘价 | 涨跌 | 手数 | 占用(元) |",
+              "|---|------|------|------|------|------|-------|-------|-------|------|"
+              "-----------|----------|----------|------|-------|-------|------|------|---------|"]
         for i, (_, r) in enumerate(d.iterrows(), 1):
             zs = " | ".join(f"{r[z]:+.2f}" for z in ("value_z", "quality_z", "safety_z") if z in d.columns)
             rk = f"{int(r['rank'])}" if "rank" in d.columns and np.isfinite(r.get("rank", np.nan)) else "—"
+
+            def _yi(v):
+                return "—" if not np.isfinite(v) else f"{v / 1e8:,.1f}"
+
+            def _pct(v):
+                return "—" if not np.isfinite(v) else f"{v * 100:.1f}%"
+
+            vm = _yi(r["v_mid"]) if "v_mid" in d.columns else "—"
+            bp = _yi(r["buy_point"]) if "buy_point" in d.columns else "—"
+            sp = _yi(r["sell_point"]) if "sell_point" in d.columns else "—"
+            vd = (r.get("verdict") or "—") if "verdict" in d.columns else "—"
+            gi = _pct(r["g_implied"]) if "g_implied" in d.columns else "—"
             L.append(f"| {i} | {r['code']} | {r['name']} | {r['industry']} | {r['weight']:.2%} | "
-                     f"{r['total_score']:.2f} | {zs} | {rk} | {r['价']:.2f} | {r['涨跌']:+.2f}% | "
+                     f"{r['total_score']:.2f} | {zs} | {rk} | {vm} | {bp} | {sp} | {vd} | {gi} | "
+                     f"{r['价']:.2f} | {r['涨跌']:+.2f}% | "
                      f"{r['手数']} | {r['占用']:,.0f} |")
         L += ["", f"合计占用 **{d['占用'].sum():,.0f} 元**，"
                   f"剩余现金 **{args.capital - d['占用'].sum():,.0f} 元**。", ""]

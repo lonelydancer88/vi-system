@@ -25,8 +25,13 @@ from ..portfolio.constructor import build_portfolio, turnover
 # ==================================================================== 单次筛选截面
 # 面板记录字段（with_panel=True 时每期保存，供逐期调仓原因归因）
 # 三支柱记行业内中性 z（value_z 等）；行业内 pct 仅供展示、不作为排序/门槛依据。
+# 面板快照列：L4（三支柱行业内中性 z / 总分 / rank）+ L5（逆向 DCF 与两阶段三情景估值）。
+# 只有 with_valuation=True 的 screen_at 才会带 v_* 系列列；缺失列在快照时被过滤掉。
 _PANEL_COLS = ("code", "name", "industry", "rank", "value_z",
-               "quality_z", "safety_z", "total_score", "passes_gate")
+               "quality_z", "safety_z", "total_score", "passes_gate",
+               "mktcap", "fcf0", "fcf_is_fallback", "g_implied",
+               "v_bull", "v_base", "v_bear", "v_mid",
+               "buy_point", "sell_point", "downside_bear", "verdict")
 
 
 def screen_at(store, asof, cfg: Config, with_valuation: bool = False):
@@ -643,7 +648,7 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
             if np.isfinite(p) and p > 0 and r["w_new"] > 1e-9:
                 lots = int(r["w_new"] * capital / p / 100)
                 cost = lots * 100 * p
-            _why = (_action_reason_from(_by, d, r["code"], r["action"])
+            _why = (_reason_cell(_by, d, r["code"], r["action"])
                     if _by else "—（无面板）")
             lines.append(
                 f"| {d} | {r['action']} | {r['code']} | {r['name']} | {r['industry']} | "
@@ -783,6 +788,59 @@ def _action_reason_from(by_date: dict, date, code: str, action: str) -> str:
     return f"权重随当期信号调整：排名 {rk_txt}{sc_txt}，z≥0 门槛{'过' if gate else '未过'}"
 
 
+def _valuation_from(g: pd.DataFrame | None, date, code: str) -> str:
+    """从当期因子面板取 L5 估值摘要（单位：亿元 / 隐含 g 与空间：%）。
+
+    只描述「该时点可得」的估值 —— 与原因文本同源，保证 reasons / trades 可追溯。
+    无估值列（回测未开 with_valuation）或数据缺失时返回空串。
+    """
+    if g is None or g.empty:
+        return ""
+    if "v_mid" not in g.columns:
+        return ""
+    row = g[g["code"] == code]
+    if row.empty:
+        return ""
+    r = row.iloc[0]
+
+    def _num(x):
+        try:
+            return bool(np.isfinite(float(x)))
+        except Exception:
+            return False
+
+    def _yi(x):
+        return None if not _num(x) else float(x) / 1e8
+
+    if _yi(r.get("v_mid")) is None:
+        return ""
+    parts = [f"v_mid {_yi(r.get('v_mid')):,.1f}亿"]
+    for label, col in (("买点", "buy_point"), ("卖点", "sell_point")):
+        v = _yi(r.get(col))
+        if v is not None:
+            parts.append(f"{label} {v:,.1f}亿")
+    if _num(r.get("mktcap")) and float(r["mktcap"]) > 0:
+        parts.append(f"空间 {float(r['v_mid']) / float(r['mktcap']) - 1:+.0%}")
+    if "verdict" in g.columns:
+        vd = r.get("verdict")
+        if vd is not None and not (isinstance(vd, float) and np.isnan(vd)):
+            parts.append(str(vd))
+    if _num(r.get("g_implied")):
+        parts.append(f"隐含g {float(r['g_implied']) * 100:.1f}%")
+    if "fcf_is_fallback" in g.columns:
+        fb = r.get("fcf_is_fallback", False)
+        if isinstance(fb, (bool, np.bool_)) and bool(fb):
+            parts.append("FCF为净利兜底")
+    return "｜".join(parts)
+
+
+def _reason_cell(by_date: dict, date, code: str, action: str) -> str:
+    """交易原因文本 + L5 估值摘要（trades 台账「原因」列用；L4 已含在原因文本内）。"""
+    why = _action_reason_from(by_date, date, code, action)
+    vtxt = _valuation_from(by_date.get(pd.Timestamp(date)), date, code)
+    return f"{why}｜估值 {vtxt}" if vtxt else why
+
+
 def trade_reasons_report(result: dict, store, top_n: int = 0) -> str:
     """基于每期因子面板（with_panel=True 的回测结果）生成逐期调仓原因。
 
@@ -801,7 +859,10 @@ def trade_reasons_report(result: dict, store, top_n: int = 0) -> str:
     lines = ["# 逐期调仓原因", "",
              "> 依据：与每次调仓同期的因子面板（with_panel=True 记录）。价值/质量/安全三支柱为"
              "**行业内中性 z**（相对同行标准差；过 AND 门需各柱 z≥0，即每柱都跑赢行业均值）；"
-             "排名越小越优。", ""]
+             "排名越小越优。",
+             "> **估值(L5)**：同期的逆向 DCF + 三情景（v_mid=三情景中位数，买点=v_mid×0.70，"
+             "卖点=v_mid×1.50，单位：亿元）；「空间」= v_mid 相对当期市值的空间；「隐含g」为市场价"
+             "反解的永续增长率。历史早期财报现金流缺失时列为 —。", ""]
     ledger = trade_ledger(result, store)
     n_show = 0
     for blk in ledger:
@@ -821,12 +882,14 @@ def trade_reasons_report(result: dict, store, top_n: int = 0) -> str:
                 pass
         show = rows if top_n <= 0 else rows[:top_n]
         lines += [f"## {pd.Timestamp(d).date()}（{len(rows)} 笔变动{rmeta}）", "",
-                  "| 动作 | 名称 | 行业 | 原因 |", "|------|------|------|------|"]
+                  "| 动作 | 名称 | 行业 | 估值(L5) | 原因 |",
+                  "|------|------|------|---------|------|"]
         for t in show:
             why = _action_reason_from(by_date, d, t["code"], t["action"])
+            vtxt = _valuation_from(by_date.get(pd.Timestamp(d)), d, t["code"])
             ind = (t.get("industry") or "") or ""
             name = t.get("name") or t["code"]
-            lines.append(f"| {t['action']} | {name} | {ind} | {why} |")
+            lines.append(f"| {t['action']} | {name} | {ind} | {vtxt or '—'} | {why} |")
         lines.append("")
         n_show += 1
     lines += ["---", f"共 {n_show} 期发生调仓。"]
