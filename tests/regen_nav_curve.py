@@ -114,10 +114,75 @@ def plot() -> None:
     print("→ out/nav-curve.png（已重生成）")
 
 
+def plot_from_reports(asof: str = "2026-09-07") -> None:
+    """直接从已生成的回测报告解析净值，不再重跑回测。
+
+    为什么需要这条路径：`--dump` 要跑 4 次回测（各 ~10-15min），在本环境
+    「约 20 分钟硬杀长进程」下实测全部被杀、缓存为空。而回测报告的每期标题里
+    已经带了「组合收益 / 基准 / 累计净值」，足以还原曲线 —— 秒级完成。
+
+    报告格式：`## 第 N 期：YYYY-MM-DD（组合收益 ±x%，基准 ±y%，超额 ±z%，累计净值 1.xxx）`
+    """
+    import re
+    import pandas as pd
+
+    pat = re.compile(
+        r"## 第 \d+ 期：(\d{4}-\d{2}-\d{2})（组合收益 ([+-][\d.]+)%，"
+        r"基准 ([+-][\d.]+)%，超额 ([+-][\d.]+)%，累计净值 ([\d.]+)）"
+    )
+    series, bench_nav = {}, None
+    for key, fname in (("30", "top30"), ("5", "top5"), ("3", "top3")):
+        path = OUT / f"回测报告-{fname}-{asof}.md"
+        if not path.exists():
+            print(f"[warn] 缺 {path.name}，跳过")
+            continue
+        rows = pat.findall(path.read_text(encoding="utf-8"))
+        if not rows:
+            print(f"[warn] {path.name} 未解析到期数据，跳过")
+            continue
+        dates = pd.to_datetime([r[0] for r in rows])
+        strat = pd.Series([float(r[4]) for r in rows], index=dates)
+        bret = pd.Series([float(r[2]) / 100.0 for r in rows], index=dates)
+        series[key] = strat
+        if bench_nav is None:  # 等权基准三份报告一致，取第一份即可
+            bench_nav = (1 + bret).cumprod()
+    if not series:
+        print("[error] 无可用报告")
+        sys.exit(1)
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    colors = {"30": "#c0392b", "5": "#27ae60", "3": "#e67e22"}
+    names = {"30": "策略·30只", "5": "策略·最多5只", "3": "策略·最多3只"}
+    for key in ("30", "5", "3"):
+        if key not in series:
+            continue
+        s = series[key]
+        cagr = (s.iloc[-1] ** (1 / (len(s) / 3)) - 1) if len(s) else float("nan")
+        ax.plot(s.index, s.values, lw=2.0 if key == "30" else 1.6,
+                color=colors[key], label=f"{names[key]}（年化 {cagr:+.1%}）")
+    if bench_nav is not None:
+        bcagr = bench_nav.iloc[-1] ** (1 / (len(bench_nav) / 3)) - 1
+        ax.plot(bench_nav.index, bench_nav.values, lw=1.2, ls="--", color="#7f8c8d",
+                label=f"等权全市场基准（年化 {bcagr:+.1%}）")
+    ax.axhline(1.0, color="gray", lw=0.6, alpha=0.6)
+    ax.set_title(f"净值曲线（{series[list(series)[0]].index[0].date()} 起，"
+                 f"分红再投口径，费用后；由回测报告还原）", fontsize=12)
+    ax.set_ylabel("净值（起点=1）")
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    OUT.mkdir(exist_ok=True)
+    fig.savefig(OUT / "nav-curve.png", dpi=150)
+    plt.close(fig)
+    print(f"→ out/nav-curve.png（由 {len(series)} 份回测报告还原，{len(series[list(series)[0]])} 期）")
+
+
 if __name__ == "__main__":
     CACHE.mkdir(parents=True, exist_ok=True)
     if "--plot" in sys.argv:
         plot()
+    elif "--from-reports" in sys.argv:
+        plot_from_reports()
     elif "--dump" in sys.argv:
         dump(sys.argv[sys.argv.index("--dump") + 1])
     else:
