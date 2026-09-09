@@ -150,22 +150,73 @@ def plot_from_reports(asof: str = "2026-09-07") -> None:
         print("[error] 无可用报告")
         sys.exit(1)
 
+    # --- 期度对齐（关键，错位一期会让曲线整体偏移）
+    # 回测调仓日共 41 个，实算起点 2017-05-15 = dates[12]；报告共 28 期。
+    # 报告标题里的日期是**期初**，而「累计净值」是**期末**值。
+    # 例：第1期标签 2017-05-15、净值 1.120，实际是 2017-05-15→2017-09-15 的收益。
+    # 故净值点应画在「下一个调仓日」上，并在起点补一个 1.0。
+    from vi_system.data.store import Store
+    from vi_system.config import load_config
+    _cfg = load_config()
+    _bc = _cfg.section("backtest")
+    _dates = Store(str(DB)).rebalance_dates(
+        _bc.get("rebalance_months", [5, 9]), _bc.get("rebalance_day", 15),
+        "2013-01-01", "2026-12-31")
+    _dstr = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in _dates]
+    # 每期标签日期 → 下一个调仓日（期末）
+    end_dates, origin = [], None
+    for i, (k, s) in enumerate(series.items()):
+        idxs = [_dstr.index(pd.Timestamp(d).strftime("%Y-%m-%d")) for d in s.index]
+        if origin is None:
+            origin = _dates[idxs[0]]          # 实算起点（1.0 所在日）
+        ends = pd.DatetimeIndex([_dates[j + 1] for j in idxs])
+        series[k] = pd.Series(s.values, index=ends)
+        end_dates = ends
+    if bench_nav is not None:
+        bench_nav = pd.Series(bench_nav.values, index=end_dates)
+
+    # --- 沪深300：报告用的是等权基准，指数需单独从库里取并对齐同口径
+    hs_nav = None
+    try:
+        idx = Store(str(DB)).load_index_prices()
+        s = idx[idx["code"] == "sh000300"].set_index("date")["close"].sort_index()
+
+        def _close_at(d):
+            sub = s[s.index <= pd.Timestamp(d)]
+            return float(sub.iloc[-1]) if len(sub) else float("nan")
+
+        c0 = _close_at(origin)
+        hs_nav = pd.Series([_close_at(d) / c0 for d in end_dates], index=end_dates)
+    except Exception as e:
+        print(f"[warn] 沪深300 取数失败：{e}")
+
     fig, ax = plt.subplots(figsize=(11, 6))
     colors = {"30": "#c0392b", "5": "#27ae60", "3": "#e67e22"}
     names = {"30": "策略·30只", "5": "策略·最多5只", "3": "策略·最多3只"}
+
+    def _with_origin(s):
+        """在起点补 1.0，使所有曲线同从 1 出发。"""
+        return pd.concat([pd.Series([1.0], index=[origin]), s])
+
     for key in ("30", "5", "3"):
         if key not in series:
             continue
-        s = series[key]
-        cagr = (s.iloc[-1] ** (1 / (len(s) / 3)) - 1) if len(s) else float("nan")
+        s = _with_origin(series[key])
+        cagr = s.iloc[-1] ** (1 / (len(s) / 3)) - 1
         ax.plot(s.index, s.values, lw=2.0 if key == "30" else 1.6,
                 color=colors[key], label=f"{names[key]}（年化 {cagr:+.1%}）")
+    if hs_nav is not None:
+        s = _with_origin(hs_nav)
+        cagr = s.iloc[-1] ** (1 / (len(s) / 3)) - 1
+        ax.plot(s.index, s.values, lw=1.6, color="#2980b9",
+                label=f"沪深300·价格回报（年化 {cagr:+.1%}）")
     if bench_nav is not None:
-        bcagr = bench_nav.iloc[-1] ** (1 / (len(bench_nav) / 3)) - 1
-        ax.plot(bench_nav.index, bench_nav.values, lw=1.2, ls="--", color="#7f8c8d",
-                label=f"等权全市场基准（年化 {bcagr:+.1%}）")
+        s = _with_origin(bench_nav)
+        cagr = s.iloc[-1] ** (1 / (len(s) / 3)) - 1
+        ax.plot(s.index, s.values, lw=1.2, ls="--", color="#7f8c8d",
+                label=f"等权全市场基准（年化 {cagr:+.1%}）")
     ax.axhline(1.0, color="gray", lw=0.6, alpha=0.6)
-    ax.set_title(f"净值曲线（{series[list(series)[0]].index[0].date()} 起，"
+    ax.set_title(f"净值曲线（{pd.Timestamp(origin).date()} 起，剔除期初空仓期；"
                  f"分红再投口径，费用后；由回测报告还原）", fontsize=12)
     ax.set_ylabel("净值（起点=1）")
     ax.legend(loc="upper left", fontsize=9)
