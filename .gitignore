@@ -29,3 +29,8 @@ venv/
 
 # 系统
 .DS_Store
+
+# 净值曲线缓存（regen_nav_curve.py 中间产物，可用 --dump 重建）
+out/_navcache/
+# 抓取脚本 stdout 重定向
+/data/*/*.out

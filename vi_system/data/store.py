@@ -120,7 +120,7 @@ class Store:
         return pd.read_parquet(self.universe_path)
 
     # ==================================================== point-in-time 核心
-    def facts_asof(self, asof: str | pd.Timestamp, periods: int = 12) -> pd.DataFrame:
+    def facts_asof(self, asof: str | pd.Timestamp, periods: int = 24) -> pd.DataFrame:
         """返回截至 asof 可见的财务宽表（panel）。
 
         规则：
@@ -128,6 +128,10 @@ class Store:
           2. 同一 (code, field, period) 取 announce_date 最大的版本（最新重述）
           3. 只保留最近 `periods` 个报告期（控制计算量）
           4. pivot 成 (code, period) × field
+
+        注：`periods` 默认 24（≈6 年 × 4 期），保证季报接入后仍有 ≥5 个年报供
+        5 年指标（hist5 / profit_growth_5y / share_dilution_5y）使用，不会被季度
+        稀释成 5 个季度。仅年报时 24 自然覆盖全部历史，行为不变。
         """
         facts = self.load_facts()
         if facts.empty:

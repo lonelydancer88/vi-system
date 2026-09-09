@@ -3,7 +3,10 @@
 产出一张"每只股票一行"的指标表，供排雷层与因子层消费。
 
 设计原则：
-  - **只用年报**（period 以 1231 结尾）。季报与年报混用会让五年中位数失真。
+  - **双轨**：趋势/5 年类指标（增长率、股本膨胀、OCF/NI 5 年、Beneish、审计意见）只用年报
+    （period 以 1231 结尾），避免季度累计值与年报混用导致中位数/增长率失真；
+    **当期快照指标**（EP/BP/CFP/ROIC/应计/净派现等）改用最新披露期的资产负债表(时点值)
+    + 利润表/现金流量表 TTM，使财报新鲜度提到最近一期（季报/中报/三季报）。
   - **市值用决策日的**（market 表），不用财报里的历史市值 —— 估值永远相对当下价格。
   - **缺失即 NaN**，不做任何填补。
 """
@@ -24,6 +27,53 @@ from ..data.schema import (
 )
 
 TAX_RATE = 0.25
+
+# 利润表/现金流量表中的「累计(YTD)」字段，需转 TTM 才能与市值、资产负债表(时点值)对齐。
+# 资产负债表字段(总资产/权益/负债/现金/应收/存货/PPE/商誉/有息负债/股本等)为时点值，
+# 原样使用，不做 TTM 转换（TTM 仅对流量字段有意义）。
+FLOW_FIELDS = {
+    REVENUE, COGS, SGA, EBIT, INTEREST_EXPENSE, NET_INCOME, NET_INCOME_TOTAL,
+    OCF, CAPEX, DEPRECIATION, DIVIDEND_PAID, DIVIDEND, EQUITY_ISSUED, BUYBACK,
+}
+
+
+def _ttm_for_periods(full: pd.DataFrame, flow_fields) -> dict:
+    """对单只股票的各**财报期**计算 TTM 值（仅 flow 累计字段）。
+
+    返回 {period_str: {field: ttm_value}}。
+      - 年报(1231)：TTM 恒等于其 YTD（恒等式，验证用）。
+      - 季报(0331/0630/0930)：TTM = 当期YTD + 上年年报 − 上年同期YTD。
+      - 缺上年年报或上年同期 YTD：该字段置 NaN（下游按缺失中性处理）。
+
+    仅遍历财报期（0331/0630/0930/1231），**排除质押等时点快照**（其 period 形如
+    202609040101，announce_date 为抓取日，会污染"最新披露期"判定）。
+    """
+    rep = full[full["period"].astype(str).str.endswith(("1231", "0630", "0930", "0331"))]
+    cols = [c for c in flow_fields if c in rep.columns]
+    row_by_p = {str(r["period"]): r for _, r in rep.iterrows()}
+    annual_by_year = {
+        str(r["period"])[:4]: r for _, r in rep.iterrows()
+        if str(r["period"]).endswith("1231")
+    }
+    out: dict = {}
+    for p in rep["period"].astype(str).tolist():
+        y, suffix = p[:4], p[4:]
+        if suffix == "1231":
+            out[p] = {f: row_by_p[p].get(f, np.nan) for f in cols}
+            continue
+        ap = annual_by_year.get(str(int(y) - 1))
+        pqr = row_by_p.get(f"{int(y) - 1}{suffix}")
+        if ap is None or pqr is None:
+            out[p] = {f: np.nan for f in cols}
+            continue
+        d = {}
+        for f in cols:
+            yc = row_by_p[p].get(f, np.nan)
+            av = ap.get(f, np.nan)
+            pv = pqr.get(f, np.nan)
+            d[f] = (yc + av - pv) if (np.isfinite(yc) and np.isfinite(av) and np.isfinite(pv)) else np.nan
+        out[p] = d
+    return out
 
 
 def _d(a, b):
@@ -112,14 +162,33 @@ def _altman_z(cur: pd.Series, mktcap: float) -> float:
 
 
 def _metrics_for_code(g: pd.DataFrame, mktcap: float) -> dict:
-    """对单只股票的年报序列计算全部指标。"""
+    """对单只股票计算全部指标（双轨）。
+
+    - **年报轨** `g`：5 年指标、Beneish、审计意见、股本膨胀等趋势类指标，
+      只用年报（period 以 1231 结尾），避免季度累计值与年报混用导致中位数/增长率失真。
+    - **当期轨** `cur`：便宜/质量/安全等「当期快照」指标，使用**最新披露期**的
+      资产负债表（时点值）+ 利润表/现金流量表 **TTM**（流量累计值转 trailing 12m），
+      使估值相对当下价格、且财报新鲜度提到最近一期（季报/中报/三季报）。
+    """
     # 先留一份全量：质押等「时点快照」数据的 period 是时间戳（如 202609040101）
     # 而非年报，会被下面的年报过滤丢弃，需单独回退取用（见 pledge_ratio）。
     full = g.sort_values("period")
-    g = full[full["period"].astype(str).str.endswith("1231")]
+    # 财报期（0331/0630/0930/1231）：用于当期轨与 TTM；质押快照不在此列。
+    rep = full[full["period"].astype(str).str.endswith(("1231", "0630", "0930", "0331"))]
+    # 年报轨：趋势/5年类指标只走年报
+    g = rep[rep["period"].astype(str).str.endswith("1231")].copy()
     if g.empty:
         return {}
-    cur = g.iloc[-1]
+
+    # 当期轨：最新披露期（按公告日最新，且限定为财报期）的资产负债表(点数据)
+    # + 利润表/现金流(TTM)。
+    ttm_map = _ttm_for_periods(rep, FLOW_FIELDS)
+    latest_period = str(rep.sort_values("announce_date")["period"].iloc[-1])
+    cur = rep[rep["period"].astype(str) == latest_period].iloc[0].copy()
+    for f in FLOW_FIELDS:
+        if f in cur.index:
+            cur[f] = ttm_map.get(latest_period, {}).get(f, np.nan)
+
     prev = g.iloc[-2] if len(g) > 1 else None
     hist5 = g.tail(5)
 

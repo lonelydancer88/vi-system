@@ -161,7 +161,10 @@ def main():
     check("回测无错误", "error" not in res, res.get("error", ""))
     if "error" not in res:
         st_ = res["stats"]
-        check("NAV 序列长度正确", len(res["nav"]) == len(res["records"]))
+        check("NAV 序列长度正确", len(res["nav"]) == len(res["records"]) + 1,
+              f"nav={len(res['nav'])} records={len(res['records'])} (+1 建仓基点)")
+        check("NAV 起点为 1.0", abs(float(res["nav"]["nav"].iloc[0]) - 1.0) < 1e-9,
+              f"起点={float(res['nav']['nav'].iloc[0]):.4f}")
         check("成本被计提", float(res["records"]["cost"].sum()) > 0,
               f"累计成本 {res['records']['cost'].sum():.4f}")
         check("换手被记录", float(res["records"]["turnover"].mean()) > 0,

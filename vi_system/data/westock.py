@@ -223,10 +223,11 @@ class WeStockFetcher:
 
             inc, bal, cfs = _latest(income), _latest(balance), _latest(cashflow)
             for period in sorted(set(inc) | set(bal) | set(cfs)):
-                # 只用年报（period 以 1231 结尾）。季报与年报混用会让 5 年中位数失真，
-                # 且 ROE/增长会退化成季度值。这与合成数据的 schema 完全一致。
-                if not str(period).endswith("1231"):
-                    continue
+                # 保留全部报告期（0331/0630/0930/1231）。
+                # 历史注释曾"只用年报"以保 5 年中位数不失真；现改为双轨：
+                # 5 年/趋势类指标在 metrics 层仍只取年报，当期指标用最新期的
+                # 资产负债表(点数据)+利润表/现金流(TTM)。原始值按 YTD 累计落盘，
+                # TTM 折算在 metrics 层按需完成（见 vi_system/pipeline/metrics.py）。
                 i, b, c = inc.get(period, {}), bal.get(period, {}), cfs.get(period, {})
                 ann = (i.get("InfoPublDate") or b.get("InfoPublDate")
                        or c.get("InfoPublDate"))

@@ -255,7 +255,17 @@ def run_backtest(
             eff_start = records[0]["date"]
 
     rec = pd.DataFrame(records)
-    nav_curve = rec.set_index("date")[["nav", "bench"]]
+    # 净值曲线：每段持有收益记在期末(next_date)，并在最前补一个建仓基点
+    # (eff_start, nav=1.0, bench=1.0)，使曲线从 1.0 起步。修复：原实现把首期
+    # 收益前置记在 eff_start 当日，导致曲线起点 ≠ 1。reasons 报告仍引用 rec 的
+    # 原始 date（期初调仓日），不受影响。
+    _navc = rec[["next_date", "nav", "bench"]].rename(columns={"next_date": "date"})
+    _navc = _navc.set_index("date")[["nav", "bench"]]
+    _base = pd.DataFrame(
+        {"nav": [1.0], "bench": [1.0]},
+        index=[pd.Timestamp(eff_start)],
+    )
+    nav_curve = pd.concat([_base, _navc]).sort_index()
     stats = _stats(rec, nav_curve, bench_label=bench_label)
     stats["label"] = label
     stats["effective_start"] = str(pd.to_datetime(eff_start).date())
@@ -280,7 +290,12 @@ def run_backtest(
 
 def _stats(rec: pd.DataFrame, nav: pd.DataFrame, bench_label: str = "等权基准") -> dict:
     n = len(rec)
-    years = n / 2.0  # 每年 2 次调仓
+    # 年化口径：按实际日历跨度 + 实测期数折算，避免硬编码「每年 2 期」。
+    # 调仓改为 [5,9,11]（一年 3 次）后，旧的 n/2.0 会把 28 期当成 14 年（真实约 9.3 年），
+    # 导致 CAGR 被系统性低估约 30%、波动率被高估 sqrt(1.5) 倍。
+    first, last = nav.index[0], nav.index[-1]
+    years = (last - first).days / 365.25 if len(nav) > 1 else np.nan
+    ppy = n / years if (years and np.isfinite(years) and years > 0) else np.nan  # periods per year
     total = float(nav["nav"].iloc[-1])
     bench_total = float(nav["bench"].iloc[-1])
     cagr = total ** (1 / years) - 1 if years > 0 and total > 0 else np.nan
@@ -288,9 +303,9 @@ def _stats(rec: pd.DataFrame, nav: pd.DataFrame, bench_label: str = "等权基�
 
     r = rec["port_ret"]
     br = rec["bench_ret"]
-    vol = float(r.std(ddof=1) * np.sqrt(2)) if n > 1 else np.nan
-    bench_vol = float(br.std(ddof=1) * np.sqrt(2)) if n > 1 else np.nan
-    sharpe = (float(r.mean() * 2) / vol) if vol and np.isfinite(vol) and vol > 0 else np.nan
+    vol = float(r.std(ddof=1) * np.sqrt(ppy)) if (n > 1 and np.isfinite(ppy)) else np.nan
+    bench_vol = float(br.std(ddof=1) * np.sqrt(ppy)) if (n > 1 and np.isfinite(ppy)) else np.nan
+    sharpe = (float(r.mean() * ppy) / vol) if vol and np.isfinite(vol) and vol > 0 else np.nan
 
     cummax = nav["nav"].cummax()
     mdd = float((nav["nav"] / cummax - 1).min())
@@ -298,12 +313,13 @@ def _stats(rec: pd.DataFrame, nav: pd.DataFrame, bench_label: str = "等权基�
     bench_mdd = float((nav["bench"] / bmax - 1).min())
 
     ex = rec["excess"]
-    ir = (float(ex.mean() * 2) / float(ex.std(ddof=1) * np.sqrt(2))) \
-        if n > 1 and ex.std(ddof=1) > 0 else np.nan
+    ir = (float(ex.mean() * ppy) / float(ex.std(ddof=1) * np.sqrt(ppy))) \
+        if (n > 1 and ex.std(ddof=1) > 0 and np.isfinite(ppy)) else np.nan
 
     return {
         "periods": n,
         "years": round(years, 2),
+        "periods_per_year": round(ppy, 2) if np.isfinite(ppy) else np.nan,
         "benchmark": bench_label,
         "total_return": total - 1,
         "cagr": cagr,
@@ -350,15 +366,16 @@ def regime_report(result: dict) -> pd.DataFrame:
         (2025, 2026): "AI 行情（价值跑输期）",
     }
     rows = []
+    ppy = result.get("stats", {}).get("periods_per_year", 2.0)
     for (y0, y1), name in regimes.items():
         sub = rec[(rec["year"] >= y0) & (rec["year"] <= y1)]
         if sub.empty:
             continue
         rows.append({
             "regime": name, "periods": len(sub),
-            "port": float(sub["port_ret"].mean() * 2),
-            "bench": float(sub["bench_ret"].mean() * 2),
-            "excess": float(sub["excess"].mean() * 2),
+            "port": float(sub["port_ret"].mean() * ppy),
+            "bench": float(sub["bench_ret"].mean() * ppy),
+            "excess": float(sub["excess"].mean() * ppy),
             "win_rate": float((sub["excess"] > 0).mean()),
         })
     return pd.DataFrame(rows)
@@ -556,9 +573,11 @@ def trade_ledger(result: dict, store) -> list:
 
     ledger = []
     first_cost = {}    # code -> {"raw": 首次建仓真实价, "adj": 首次建仓后复权价}（跨期追踪收益基准）
+    first_entry = {}   # code -> 首次建仓日期（ISO 串）；清仓后若再建仓，基准重置为新日期
     prev = pd.Series(dtype=float)
     for h in holdings:
         d = h["date"]
+        d_iso = pd.to_datetime(d).date().isoformat()
         cur = h["weights"]
         cur_set, prev_set = set(cur.index), set(prev.index)
         rows = []
@@ -582,14 +601,22 @@ def trade_ledger(result: dict, store) -> list:
             adj = adj_at(d, c)          # 后复权价（收益）
             if action == "建仓" and c not in first_cost:
                 first_cost[c] = {"raw": price, "adj": adj}
+                first_entry[c] = d_iso
             cost0 = first_cost.get(c)
             cost = cost0.get("raw") if cost0 else np.nan
             cost_adj = cost0.get("adj") if cost0 else np.nan
+            # 含分红收益：后复权口径（与 NAV 同口径）
             ret = ((adj - cost_adj) / cost_adj
                    if (cost_adj is not None and np.isfinite(cost_adj) and cost_adj > 0
                        and np.isfinite(adj)) else np.nan)
+            # 价格收益：不复权口径（当前价 vs 首次建仓真实价），不含分红，可直接与行情软件核对
+            ret_price = ((price - cost) / cost
+                         if (cost is not None and np.isfinite(cost) and cost > 0
+                             and np.isfinite(price)) else np.nan)
+            entry_date = first_entry.get(c)   # 首次建仓日（建仓=本调仓日；增持/清仓=更早的初建日）
             if action == "清仓" and c in first_cost:
                 del first_cost[c]          # 清仓后若再建仓，成本基准重置（算完 ret 后再删）
+                first_entry.pop(c, None)
             rows.append({
                 "code": c,
                 "name": name_map.get(c, c),
@@ -602,6 +629,8 @@ def trade_ledger(result: dict, store) -> list:
                 "cost": cost,
                 "cost_adj": cost_adj,
                 "ret": ret,
+                "ret_price": ret_price,
+                "entry_date": entry_date,
             })
         # 本期完整持仓快照（含「持有」无动作股），用于报告「每只股票目前的收益」
         snap = []
@@ -615,6 +644,9 @@ def trade_ledger(result: dict, store) -> list:
                 ret = ((adj - cost_adj) / cost_adj
                        if (cost_adj is not None and np.isfinite(cost_adj) and cost_adj > 0
                            and np.isfinite(adj)) else np.nan)
+                ret_price = ((pr - cost) / cost
+                             if (cost is not None and np.isfinite(cost) and cost > 0
+                                 and np.isfinite(pr)) else np.nan)
                 snap.append({
                     "code": c,
                     "name": name_map.get(c, c),
@@ -623,7 +655,9 @@ def trade_ledger(result: dict, store) -> list:
                     "cost": cost,
                     "cost_adj": cost_adj,
                     "ret": ret,
+                    "ret_price": ret_price,
                     "w": float(cur.get(c, 0.0)),
+                    "entry_date": first_entry.get(c),
                 })
         n_buy = sum(1 for r in rows if r["action"] in ("建仓", "增持"))
         n_sell = sum(1 for r in rows if r["action"] in ("清仓", "减持"))
@@ -656,9 +690,11 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
         "# 交易轨迹（买卖台账）", "",
         "> **价与手数口径**：表中「真实价」= **真实不复权收盘价**（`close_raw`，经 amount/volume 反推"
         " + 科创板 688 volume 单位修复后可信），用于对照行情与手数/占用换算。"
-        "**「收益」列 = 后复权 `close_adj` 口径（含分红再投，与净值 NAV 同口径）**——"
+        "**「收益(含分红)」列 = 后复权 `close_adj` 口径（含分红再投，与净值 NAV 同口径）**——"
         "不用未复权价直接比价，否则持仓跨送转/增发除权会把收益算错（实测传音 2024 十转四"
-        "把 −20% 真跌夸大成 −45%）。", "",
+        "把 −20% 真跌夸大成 −45%）。"
+        "**「价格收益」列 = 不复权口径（当前价 vs 首次建仓真实价，不含分红）**，与行情软件默认一致，"
+        "两者之差即持有期分红贡献。", "",
         f"> 手数与占用资金按本金 **{capital/1e4:.0f} 万元** 假设换算："
         "`目标手数 = ⌊目标权重 × 本金 ÷ 价 ÷ 100⌋`（1 手 = 100 股，向下取整），"
         "`占用资金 = 目标手数 × 100 × 价`。目标手数/占用为该期**调仓后应持有的目标量**"
@@ -668,15 +704,15 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
         "> **原因口径**：「原因」为该动作在**同期截面**的信号——三支柱为**行业内中性 z**"
         "（相对同行标准差，过 AND 门需各柱 z≥0 即跑赢行业均值），排名越小越优。"
         f"{'（未记录因子面板，如需原因需以 with_panel=True 重跑）' if not _by else ''}", "",
-        "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 收益(后复权) | 目标手数 | 占用资金(元) | 原因 |",
-        "|--------|------|------|------|------|---------|---------|------|--------|------------|---------|------------|------|",
+        "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 收益(含分红) | 价格收益 | 建仓日期 | 目标手数 | 占用资金(元) | 原因 |",
+        "|--------|------|------|------|------|---------|---------|------|--------|------------|---------|---------|---------|------------|------|",
     ]
     for blk in ledger:
         d = pd.to_datetime(blk["date"]).date().isoformat()
         order = {"建仓": 0, "清仓": 1, "增持": 2, "减持": 3}
         rows = sorted(blk["trades"], key=lambda r: (order.get(r["action"], 9), -abs(r["w_chg"])))
         if not rows:
-            lines.append(f"| {d} | — | — | （无变动） | — | — | — | — | — | — | — | — | — |")
+            lines.append(f"| {d} | — | — | （无变动） | — | — | — | — | — | — | — | — | — | — |")
         shown = rows if top_n <= 0 else rows[:top_n]
         for r in shown:
             chg = f"+{r['w_chg']:.1%}" if r["w_chg"] >= 0 else f"{r['w_chg']:.1%}"
@@ -684,6 +720,10 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
             price = f"{p:.2f}" if np.isfinite(p) else "—"
             rt = r.get("ret", np.nan)
             ret_s = f"{rt:+.1%}" if (rt is not None and np.isfinite(rt)) else "—"
+            rp = r.get("ret_price", np.nan)
+            rp_s = f"{rp:+.1%}" if (rp is not None and np.isfinite(rp)) else "—"
+            ed = r.get("entry_date")
+            entry_s = ed if ed else "—"
             lots = cost = 0
             if np.isfinite(p) and p > 0 and r["w_new"] > 1e-9:
                 lots = int(r["w_new"] * capital / p / 100)
@@ -692,30 +732,34 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
                     if _by else "—（无面板）")
             lines.append(
                 f"| {d} | {r['action']} | {r['code']} | {r['name']} | {r['industry']} | "
-                f"{r['w_prev']:.1%} | {r['w_new']:.1%} | {chg} | {price} | {ret_s} | "
+                f"{r['w_prev']:.1%} | {r['w_new']:.1%} | {chg} | {price} | {ret_s} | {rp_s} | {entry_s} | "
                 f"{lots if lots > 0 else '—'} | {f'{cost:,.0f}' if cost > 0 else '—'} | {_why} |"
             )
         if top_n > 0 and len(rows) > top_n:
             lines.append(
-                f"| {d} | … | … | 其余 {len(rows) - top_n} 笔（增持/减持）略 | … | … | … | … | … | … | … | … | … |"
+                f"| {d} | … | … | 其余 {len(rows) - top_n} 笔（增持/减持）略 | … | … | … | … | … | … | … | … | … | … |"
             )
         # —— 本期持仓收益快照：调仓时每只股票目前的收益（相对首次建仓真实价）——
         snap = blk.get("snap", [])
         if snap:
             lines.append("")
             lines.append(f"**本期持仓收益（{d}，共 {len(snap)} 只）**")
-            lines.append("| 代码 | 名称 | 行业 | 建仓价 | 当前价 | 持有收益 | 权重 |")
-            lines.append("|------|------|------|--------|--------|----------|------|")
+            lines.append("| 代码 | 名称 | 行业 | 建仓日期 | 建仓价 | 当前价 | 价格收益 | 持有收益(含分红) | 权重 |")
+            lines.append("|------|------|------|---------|--------|--------|---------|------------|------|")
             tot_w = 0.0
             tot_wr = 0.0
             for s in sorted(snap, key=lambda x: -x["w"]):
                 cst = s.get("cost")
                 prc = s.get("price")
                 rtv = s.get("ret")
+                rpv = s.get("ret_price")
                 cst_f = f"{cst:.2f}" if (cst is not None and np.isfinite(cst)) else "—"
                 prc_f = f"{prc:.2f}" if (prc is not None and np.isfinite(prc)) else "—"
                 rtv_f = f"{rtv:+.1%}" if (rtv is not None and np.isfinite(rtv)) else "—"
-                lines.append(f"| {s['code']} | {s['name']} | {s['industry']} | {cst_f} | {prc_f} | {rtv_f} | {s['w']:.1%} |")
+                rpv_f = f"{rpv:+.1%}" if (rpv is not None and np.isfinite(rpv)) else "—"
+                ed = s.get("entry_date")
+                ed_f = ed if ed else "—"
+                lines.append(f"| {s['code']} | {s['name']} | {s['industry']} | {ed_f} | {cst_f} | {prc_f} | {rpv_f} | {rtv_f} | {s['w']:.1%} |")
                 if rtv is not None and np.isfinite(rtv):
                     tot_w += s["w"]
                     tot_wr += s["w"] * rtv

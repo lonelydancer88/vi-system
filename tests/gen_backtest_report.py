@@ -8,7 +8,7 @@
 区别于 backtest.md（只有业绩统计）/ trades.md（台账）/ reasons.md（仅变动）：
 本报告把三期信息合到一期一节的叙述式报告 —— 每期给出
   ① 调仓动作（买入/卖出逐笔，含买入/卖出原因 = L4 三支柱 z + 排名 + L5 估值）
-  ② 期末持仓（权重 / 现价 / 建仓价 / 持有收益）
+  ② 期末持仓（权重 / 现价 / 建仓价 / 价格收益 / 持有收益(含分红)）
 信号与原因均取「该调仓日同期」的因子面板，与回测口径一致、可追溯。
 """
 from __future__ import annotations
@@ -63,7 +63,7 @@ def main():
 
     L = [f"# 回测报告（最多持有 {args.holdings} 只）", "",
          f"> 数据口径：`{args.db}`；实算起点 **{eff}**（剔除期初空仓期）；"
-         f"调仓 5/9 月 15 日，共 {len(ledger)} 期。",
+         f"调仓 5/9/11 月 15 日（年报+一季报 / 中报 / 三季报披露后），共 {len(ledger)} 期。",
          f"> 净值/收益用后复权价（含分红再投）；价格取真实不复权收盘价 `close_raw`。"
          "**收益列一律后复权口径**（与净值一致，避免跨送转除权把收益算错）。",
          "> **买入/卖出原因**：与该调仓日同期截面 —— L4 三支柱为行业内中性 z（>0 即跑赢行业均值），"
@@ -128,34 +128,40 @@ def main():
         sells = [t for t in trades if t["action"] in ("清仓", "减持")]
         if sells:
             L += ["**当期卖出（已实现盈亏）**", "",
-                  "| 名称 | 行业 | 动作 | 卖出价 | 建仓成本 | 已实现收益 |",
-                  "|------|------|------|--------|---------|-----------|"]
+                  "| 名称 | 行业 | 动作 | 卖出价 | 建仓日期 | 建仓成本 | 价格收益 | 已实现收益(含分红) |",
+                  "|------|------|------|--------|---------|---------|---------|-----------|"]
             for t in sorted(sells, key=lambda x: x["action"]):
                 prc = t.get("price")
                 cst = t.get("cost")
                 rtv = t.get("ret")
+                rpv = t.get("ret_price")
                 prc_f = f"{prc:.2f}" if (prc is not None and np.isfinite(prc)) else "—"
                 cst_f = f"{cst:.2f}" if (cst is not None and np.isfinite(cst)) else "—"
                 rtv_f = f"{rtv:+.1%}" if (rtv is not None and np.isfinite(rtv)) else "—"
+                rpv_f = f"{rpv:+.1%}" if (rpv is not None and np.isfinite(rpv)) else "—"
+                ed_f = t.get("entry_date") or "—"
                 L.append(f"| {t['name']} | {t.get('industry', '')} | {t['action']} | "
-                         f"{prc_f} | {cst_f} | {rtv_f} |")
+                         f"{prc_f} | {ed_f} | {cst_f} | {rpv_f} | {rtv_f} |")
             L.append("")
 
         # ---------- 期末持仓
         snap = blk.get("snap", [])
         if snap:
             L += ["**期末持仓**", "",
-                  "| 名称 | 行业 | 权重 | 现价 | 建仓价 | 持有收益 |",
-                  "|------|------|------|------|--------|----------|"]
+                  "| 名称 | 行业 | 权重 | 现价 | 建仓日期 | 建仓价 | 价格收益 | 持有收益(含分红) |",
+                  "|------|------|------|------|---------|--------|---------|------------|"]
             for s in sorted(snap, key=lambda x: -x["w"]):
                 cst = s.get("cost")
                 prc = s.get("price")
                 rtv = s.get("ret")
+                rpv = s.get("ret_price")
                 cst_f = f"{cst:.2f}" if (cst is not None and np.isfinite(cst)) else "—"
                 prc_f = f"{prc:.2f}" if (prc is not None and np.isfinite(prc)) else "—"
                 rtv_f = f"{rtv:+.1%}" if (rtv is not None and np.isfinite(rtv)) else "—"
+                rpv_f = f"{rpv:+.1%}" if (rpv is not None and np.isfinite(rpv)) else "—"
+                ed_f = s.get("entry_date") or "—"
                 L.append(f"| {s['name']} | {s.get('industry', '')} | {s['w']:.1%} | "
-                         f"{prc_f} | {cst_f} | {rtv_f} |")
+                         f"{prc_f} | {ed_f} | {cst_f} | {rpv_f} | {rtv_f} |")
             L.append("")
         else:
             L += ["（空仓——当期无人过买入门槛，按纪律不动手。）", ""]
@@ -163,9 +169,10 @@ def main():
     L += ["---", "",
           "**口径附注**：信号与成交同为调仓日收盘（未实现 t+1）；基准为等权全市场"
           "（价格回报，不含股息）；「建仓价/卖出价」为**真实不复权成交价**（对照行情用），"
-          "「已实现收益/持有收益」为**后复权口径**（含分红再投，与净值 NAV 一致——"
-          "持仓跨送转/增发除权不会被未复权价差误判）；L5 估值在经营现金流缺失时以净利润×80%"
-          "兜底，银行/地产类可能失真，买入前请人工复核。", ""]
+          "「已实现收益/持有收益(含分红)」为**后复权口径**（含分红再投，与净值 NAV 一致——"
+          "持仓跨送转/增发除权不会被未复权价差误判）；同表另列「价格收益」= 不复权口径"
+          "（现价 vs 建仓价，不含分红），与行情软件默认一致，二者之差即持有期分红贡献；"
+          "L5 估值在经营现金流缺失时以净利润×80%兜底，银行/地产类可能失真，买入前请人工复核。", ""]
 
     dst = pathlib.Path("out") / f"回测报告{tag}-{str(pd.Timestamp(r['dates'][-1]).date())}.md"
     dst.write_text("\n".join(L), encoding="utf-8")

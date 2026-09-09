@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import time
 import threading
@@ -128,6 +130,27 @@ def main():
         print(f"[市值] 已回填：mktcap 有效 {int(merged['mktcap'].notna().sum())} / {len(merged)} 行", flush=True)
     except Exception as e:
         log.write(f"[warn] attach_shares: {e}\n")
+
+    # ---------------------------------------------------------------- 股本修正
+    # 第三类股本 bug：westock 的 total_share 在大比例送转/增发/借壳后会停在旧值
+    # （分众 3.28 亿 vs 真实 144.42 亿，差 44 倍）。**每次重抓 facts 都会把此前
+    # 修好的股本覆盖回退**，故必须抓完立即重跑修正 —— 否则市值全错、价值因子失真，
+    # 且不会报错（静默失效）。历史教训：2026-09-09 即因此中招。
+    try:
+        proj = ROOT.parent
+        env = dict(os.environ, PYTHONPATH=str(proj))
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parent / "fix_shares_from_em.py")],
+            cwd=str(proj), env=env, capture_output=True, text=True, timeout=1800,
+        )
+        if r.returncode == 0:
+            print("[股本] 已重跑 fix_shares_from_em（防重抓覆盖回退）", flush=True)
+        else:
+            log.write(f"[warn] fix_shares_from_em 退出码 {r.returncode}: {r.stderr[-500:]}\n")
+            print(f"[股本] ⚠️ 修正失败（退出码 {r.returncode}），市值可能失真！", flush=True)
+    except Exception as e:
+        log.write(f"[warn] fix_shares_from_em: {e}\n")
+        print(f"[股本] ⚠️ 修正异常：{e}", flush=True)
 
     print(f"[行情] 完成，累计 {len(_done_codes(st,'prices'))} 只", flush=True)
     print("全部抓取完成。", flush=True)

@@ -77,6 +77,12 @@ def build_portfolio(
         df = df[df["avg_amount_60d"] >= liq_floor]
 
     cand = df[df["passes_gate"]].copy()
+    # 估值回灌（买入侧）：L5 判为「已到卖点」的不作为新买入标的。
+    # 三支柱排序只回答"便宜/好公司/安全"，不回答"价格是否已透支"；
+    # 缺这一步会出现「好公司但已到卖点」仍被买入（如圆通速递）。
+    # 仅作用于买入，不强制卖出已持仓 —— 退出由缓冲区与 L7 论文报警负责。
+    if pcfg.get("exclude_at_sell_point", False) and "verdict" in cand.columns:
+        cand = cand[cand["verdict"] != "已到卖点"]
     # 门即纪律（决策 A：允许不满仓）：无人过 AND 门槛时保持空仓，
     # 不兜底买未过门的头部——「候选不足」不是放松买入标准的理由。
     # （旧版此处为 cand = df.head(hi)，会在极端行情下悄悄凑仓，违背该决策。）

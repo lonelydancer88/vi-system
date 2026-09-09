@@ -417,7 +417,9 @@ def test_backtest():
         nav2 = res2["nav"]["nav"].values
         check("回测确定性（两次 NAV 完全一致）", np.allclose(nav1, nav2))
         check("NAV 无 NaN", not np.isnan(nav1).any())
-        check("NAV 序列长度 = 记录数", len(nav1) == len(res1["records"]))
+        check("NAV 序列长度 = 记录数 + 1（建仓基点）",
+              len(nav1) == len(res1["records"]) + 1,
+              f"nav={len(nav1)} records={len(res1['records'])}")
         # 成本计提：累计 NAV <= 无成本累计
         rec = res1["records"]
         gross = (1 + rec["port_ret"]).prod()
@@ -524,7 +526,30 @@ def test_real_anchors():
     # 2026-09-08 修正第三类股本 bug（大比例送转/增发后股本停在旧值）后，
     # 分众传媒 sz002027 市值由错误的 15.94 亿修正为真实的 712 亿、圆通 sh600233 由 163.65 亿
     # 修正为 570.78 亿，二者「假便宜」消失、退出 top1，新奥股份 sh600803 升至第一。
-    check("2026-09-07 总分 top1 = sh600803（新奥股份）", top == "sh600803", f"top={top}")
+    # 2026-09-09 行情补齐后（prices 298→802 只），候选宇宙由 295 扩到 ~780，
+    # 行业内中性 z 的**对标组**整体变大，所有 z 值被重算 —— 榜单重排属预期行为，非回归。
+    # 同日再跑 fix_shares_from_em 修正 11 只「库内整体失真」股本（分众 3.28→144.42 亿、
+    # 紫金 26.6→265.9 亿等），市值修正后价值 z 再次重排，top1 落定海澜之家 sh600398。
+    # 注：top1 属排序口径；买入口径另由 exclude_at_sell_point 把关（见下方组合断言），
+    # 二者不矛盾 —— 排名第一也可能因「已到卖点」而不进组合。
+    check("2026-09-07 总分 top1 = sh600398（海澜之家，股本修正后）", top == "sh600398", f"top={top}")
+    check("候选池已扩容（行情补齐后宇宙 >600 只）", len(uni) > 600, f"n={len(uni)}")
+
+    # ---------------------------------------------------------- 估值回灌（买入侧）
+    # 三支柱排序只看便宜/好公司/安全，不看价格是否透支 → 需由 L5 verdict 补上「好价格」。
+    # 圆通 sh600233 总分第一但 verdict=已到卖点，必须被挡在组合之外。
+    from vi_system.portfolio import constructor as _ctor
+    pf = _ctor.build_portfolio(scored, cfg)
+    hold = set(pf["code"])
+    sp = set(scored.loc[scored["verdict"] == "已到卖点", "code"])
+    check("组合不含【已到卖点】的票（估值回灌买入侧）", not (hold & sp), f"重叠={hold & sp}")
+    check("圆通(sh600233) 总分第一但 verdict=已到卖点 → 不入组合",
+          "sh600233" in sp and "sh600233" not in hold)
+    # 反向验证：关掉开关后圆通应能进组合 —— 证明是开关在起作用，而非巧合
+    cfg_off = cfg.with_value("portfolio.exclude_at_sell_point", False)
+    pf_off = _ctor.build_portfolio(scored, cfg_off)
+    check("关掉 exclude_at_sell_point → 圆通重新入选（证明开关生效）",
+          "sh600233" in set(pf_off["code"]))
     # 排雷失效告警：商誉字段全缺 → 判 dead 并告警；质押在当期有快照数据 → 不判 dead
     warns = vetoes.warn_dead_rules(scored, cfg)
     joined = " ".join(warns)
