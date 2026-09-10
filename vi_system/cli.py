@@ -162,9 +162,9 @@ def cmd_backtest(args):
         print(bt.backtest_report(res))
         _write(bt.backtest_report(res), Path(args.out), "backtest-split.md")
     else:
-        r = bt.run_backtest(st, cfg, args.start, args.end,
-                            label=args.label, skip_empty=skip_empty,
-                            max_holdings=mh)
+        # 走统一入口 run_tier：估值 verdict 回灌组合构建，与回测报告/净值曲线同口径
+        r = bt.run_tier(st, cfg, max_holdings=mh, label=args.label,
+                        start=args.start, end=args.end, skip_empty=skip_empty)
         if r.get("error"):
             print("回测失败：", r["error"])
             return
@@ -191,8 +191,8 @@ def cmd_trades(args):
     st = _store(args.db)
     mh = getattr(args, "max_holdings", None)
     tag = f"-top{mh}" if mh else ""
-    r = bt.run_backtest(st, cfg, args.start, args.end, label="full",
-                        max_holdings=mh, with_panel=True, with_valuation=True)
+    r = bt.run_tier(st, cfg, start=args.start, end=args.end,
+                    max_holdings=mh, with_panel=True)
     if r.get("error"):
         print("回测失败：", r["error"])
         return
@@ -208,8 +208,8 @@ def cmd_reasons(args):
     st = _store(args.db)
     mh = getattr(args, "max_holdings", None)
     tag = f"-top{mh}" if mh else ""
-    r = bt.run_backtest(st, cfg, args.start, args.end, label="full",
-                        max_holdings=mh, with_panel=True, with_valuation=True)
+    r = bt.run_tier(st, cfg, start=args.start, end=args.end,
+                    max_holdings=mh, with_panel=True)
     if r.get("error"):
         print("回测失败：", r["error"])
         return

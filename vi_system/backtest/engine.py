@@ -76,6 +76,42 @@ def _index_benchmark_returns(store, code: str, dates: list) -> list | None:
     return rets
 
 
+# ---------------------------------------------------------------- 统一口径
+# 全项目「TopN 档位」回测的唯一入口。
+#
+# 历史坑（务必不再复现）：报告 / CLI / 净值曲线各自直接调 run_backtest，
+# 但只有 gen_backtest_report 传了 with_valuation=True。而 with_valuation 决定
+# screen_at 是否跑估值、是否产出 verdict 列，组合构建又会按 verdict 过滤
+# （已到卖点不买）—— 于是同一「5 只档」在报告里 9.9%、CLI 里 6.2%，
+# 并非算错，而是两个不同的组合。故收口到本函数：窗口 / 剔空仓 / 估值回灌固定。
+BACKTEST_START = "2013-01-01"
+BACKTEST_END = "2026-12-31"
+
+
+def run_tier(
+    store,
+    cfg: Config,
+    max_holdings: int | None = None,
+    benchmark: str = "equal",
+    label: str = "full",
+    start: str = BACKTEST_START,
+    end: str = BACKTEST_END,
+    with_panel: bool = False,
+    skip_empty: bool = True,
+) -> dict:
+    """统一口径跑一档回测：估值 verdict 回灌 + 同一窗口 + 剔除期初空仓期。
+
+    所有对外口径（回测报告、CLI backtest、净值曲线）都必须走这里，
+    否则会出现「同名档位数出三组数」的口径分裂。
+    """
+    return run_backtest(
+        store, cfg, start, end, label=label,
+        benchmark=benchmark, skip_empty=skip_empty,
+        max_holdings=max_holdings,
+        with_valuation=True, with_panel=with_panel,
+    )
+
+
 def run_backtest(
     store,
     cfg: Config,
@@ -345,8 +381,11 @@ def split_sample(store, cfg: Config) -> dict:
     ins = b.get("in_sample", ["2010-01-01", "2018-12-31"])
     oos = b.get("out_of_sample", ["2019-01-01", "2026-12-31"])
     return {
-        "in_sample": run_backtest(store, cfg, ins[0], ins[1], label="样本内"),
-        "out_of_sample": run_backtest(store, cfg, oos[0], oos[1], label="样本外"),
+        # 同样开启估值 verdict 回灌，保持与 run_tier / 回测报告同口径
+        "in_sample": run_backtest(store, cfg, ins[0], ins[1], label="样本内",
+                                  with_valuation=True),
+        "out_of_sample": run_backtest(store, cfg, oos[0], oos[1], label="样本外",
+                                      with_valuation=True),
     }
 
 
@@ -456,10 +495,10 @@ def compare_benchmarks(
 
     max_holdings: 传给 run_backtest 的持股上限（None=配置默认）。
     """
-    r_eq = run_backtest(store, cfg, start, end, label="full", benchmark="equal",
-                        max_holdings=max_holdings)
-    r_ix = run_backtest(store, cfg, start, end, label="full", benchmark=index_code,
-                        max_holdings=max_holdings)
+    r_eq = run_tier(store, cfg, start=start, end=end, benchmark="equal",
+                    max_holdings=max_holdings)
+    r_ix = run_tier(store, cfg, start=start, end=end, benchmark=index_code,
+                    max_holdings=max_holdings)
     if r_eq.get("error"):
         return f"回测失败（等权）：{r_eq['error']}"
     if r_ix.get("error"):

@@ -42,13 +42,13 @@ sys.path.insert(0, str(ROOT))
 
 from vi_system.config import load_config
 from vi_system.data.store import Store
-from vi_system.backtest.engine import run_backtest
+from vi_system.backtest.engine import run_tier
 
 DB = ROOT / "data" / "real_universe"
 OUT = ROOT / "out"
 CACHE = OUT / "_navcache"
 
-# label -> (run_backtest kwargs)
+# label -> run_tier kwargs（统一入口：估值 verdict 回灌，与回测报告/CLI 同口径）
 SPECS = {
     "30": {"label": "30只", "benchmark": "sh000300"},
     "5": {"label": "5只", "benchmark": "sh000300", "max_holdings": 5},
@@ -60,7 +60,7 @@ SPECS = {
 def dump(key: str) -> None:
     spec = SPECS[key]
     store, cfg = Store(DB), load_config()
-    r = run_backtest(store, cfg, "2013-01-01", "2026-12-31", **spec)
+    r = run_tier(store, cfg, **spec)
     if "error" in r:
         print(f"[error] {key}: {r['error']}")
         sys.exit(1)

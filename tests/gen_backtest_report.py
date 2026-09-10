@@ -46,9 +46,9 @@ def main():
 
     cfg, st = _cfg(None), _store(args.db)
     tag = "" if args.holdings in (None, 0) else f"-top{args.holdings}"
-    r = bt.run_backtest(st, cfg, args.start, args.end, label="full",
-                        max_holdings=args.holdings if args.holdings else None,
-                        with_panel=True, with_valuation=True)
+    r = bt.run_tier(st, cfg, start=args.start, end=args.end,
+                    max_holdings=args.holdings if args.holdings else None,
+                    with_panel=True)
     if r.get("error"):
         print("回测失败：", r["error"])
         sys.exit(1)
