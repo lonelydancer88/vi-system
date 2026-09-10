@@ -36,8 +36,26 @@ _PANEL_COLS = ("code", "name", "industry", "rank", "value_z",
 _REJ_COLS = ("code", "name", "industry", "rule", "rule_desc", "value", "threshold")
 
 
+# 同一进程内按 (asof, with_valuation) 缓存 L1→L5 筛选结果。
+# 动机：Top30/Top5/Top3 三档的筛选过程完全一样，只有组组合那步不同。
+# 缓存后三档合计只需筛一遍，净值曲线重生成从 ~40 分钟降到一遍的时间。
+# 返回副本，避免上层就地修改污染缓存。
+_SCREEN_CACHE: dict = {}
+
+
+def clear_screen_cache() -> None:
+    """换库/换配置时调用，避免拿到旧宇宙的缓存。"""
+    _SCREEN_CACHE.clear()
+
+
 def screen_at(store, asof, cfg: Config, with_valuation: bool = False):
     """在 asof 时点跑完 L1→L5，返回 (scored_or_valued, rejected, universe)。"""
+    key = (str(asof), bool(with_valuation))
+    hit = _SCREEN_CACHE.get(key)
+    if hit is not None:
+        scored, rejected, uni = hit
+        return (scored.copy() if scored is not None and not scored.empty else scored,
+                rejected, uni)
     uni = _universe.build_universe(store, asof, cfg)
     if uni.empty:
         return pd.DataFrame(), pd.DataFrame(), uni
@@ -50,6 +68,7 @@ def screen_at(store, asof, cfg: Config, with_valuation: bool = False):
     scored = _factors.score_factors(passed, cfg)
     if with_valuation:
         scored = _valuation.valuate(scored, cfg)
+    _SCREEN_CACHE[key] = (scored, rejected, uni)
     return scored, rejected, uni
 
 

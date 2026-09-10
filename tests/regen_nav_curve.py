@@ -57,9 +57,8 @@ SPECS = {
 }
 
 
-def dump(key: str) -> None:
+def _run_and_save(store, cfg, key: str) -> None:
     spec = SPECS[key]
-    store, cfg = Store(DB), load_config()
     r = run_tier(store, cfg, **spec)
     if "error" in r:
         print(f"[error] {key}: {r['error']}")
@@ -73,7 +72,28 @@ def dump(key: str) -> None:
         "effective_start": str(r["effective_start"]),
     }
     (CACHE / f"meta_{key}.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-    print(f"[dump] {key} 完成：年化 {meta['cagr']:+.1%}，基准 {meta['bench_cagr']:+.1%}，{len(nav)} 期")
+    print(f"[dump] {key} 完成：年化 {meta['cagr']:+.1%}，基准 {meta['bench_cagr']:+.1%}，{len(nav)} 期",
+          flush=True)
+
+
+def dump(key: str) -> None:
+    store, cfg = Store(DB), load_config()
+    _run_and_save(store, cfg, key)
+
+
+def dump_all() -> None:
+    """单进程跑完 4 档：共享 engine 的筛选缓存（三档筛选只做一遍）。
+
+    比 4 个独立进程快约 3 倍，也避免并行抢 CPU 被回收。
+    """
+    import time as _t
+    from vi_system.backtest import engine as _eng
+    store, cfg = Store(DB), load_config()
+    t0 = _t.time()
+    for key in ["30", "5", "3", "equal"]:
+        _run_and_save(store, cfg, key)
+        print(f"  [进度] 累计 {_t.time()-t0:.0f}s，筛选缓存 {len(_eng._SCREEN_CACHE)} 期", flush=True)
+    print(f"[dump-all] 全部完成，耗时 {_t.time()-t0:.0f}s", flush=True)
 
 
 def plot() -> None:
@@ -234,6 +254,8 @@ if __name__ == "__main__":
         plot()
     elif "--from-reports" in sys.argv:
         plot_from_reports()
+    elif "--dump-all" in sys.argv:
+        dump_all()
     elif "--dump" in sys.argv:
         dump(sys.argv[sys.argv.index("--dump") + 1])
     else:
