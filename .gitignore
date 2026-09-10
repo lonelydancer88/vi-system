@@ -37,3 +37,11 @@ out/_navcache/
 
 # close_adj 修复产生的 54MB 全量备份，不入库（可用 fix_adj_local.py 回滚 close_adj_old 列替代）
 data/real_universe/prices_adj_backup_*.parquet
+
+# 行情重建中间产物（检查点/隔离/损坏文件，可用 rebuild_prices_*.py 重建）
+/data/*/prices_sina_clean.parquet*
+/data/*/prices_gtimg_clean.parquet*
+/data/*/prices_excluded*.parquet
+/data/*/*.corrupt
+/data/*/sina_fetch*.log
+/data/*/*.tmp

@@ -28,6 +28,14 @@
 - 腾讯自选股 `westock-data-skillhub`（npx 包，**无需 token**），适配器 `vi_system/data/westock.py`
 - 财报带 `InfoPublDate`（公告日）→ 可对齐 point-in-time，这是排雷/回测无前视偏差的地基
 - 已知缺口：不提供折旧/摊销、商誉、审计意见、有息负债明细
+- **行情干净上游 = gtimg 直连**（westock 落库的 close_raw 有负值、close_adj 有伪漂移）：
+  - 重建脚本 `tests/rebuild_prices_gtimg.py`（抓 raw+hfq 双序列，断点续传）。
+  - ⚠️ **gtimg `appstock/app/fqkline/get` 端点已下线（HTTP 501）**，改用
+    `appstock/app/newfqkline/get?param=<code>,day,<beg>,<end>,2000,<fq>`（fq ∈ '','qfq','hfq'）。
+  - 带复权序列大 count 会截断（2000 只回 640 行），**必须翻页**。
+  - 腾讯限流敏感：并发 ≤2~3 + 每请求 sleep 0.15s；10+ 并发会触发封禁。
+  - 长抓取任务必须 `subprocess.Popen(..., start_new_session=True)` 脱离会话，
+    否则 `run_in_background` 进程会随对话轮次被杀。
 
 ### 用户偏好
 - 不喜欢围绕已有工具做"拼接式"方案，要独立调研后的第一性判断
