@@ -34,3 +34,6 @@ venv/
 out/_navcache/
 # 抓取脚本 stdout 重定向
 /data/*/*.out
+
+# close_adj 修复产生的 54MB 全量备份，不入库（可用 fix_adj_local.py 回滚 close_adj_old 列替代）
+data/real_universe/prices_adj_backup_*.parquet
