@@ -47,6 +47,13 @@ def build_universe(store, asof: str | pd.Timestamp, cfg: Config) -> pd.DataFrame
                                               "834", "835", "836", "837", "838",
                                               "839", "870", "871", "872", "873"])]
 
+    # --- 行业排除（OCF 口径失真 / 财报科目与实业不可比）
+    #     实证：银行/非银/房地产 的 OCF 含客户存款、预售款（合同负债）等递延项，
+    #     ocf−capex 不是可自由支配现金流 → FCF、accruals 等衍生指标系统性失真。
+    ex_inds = list(ucfg.get("exclude_industries", []) or [])
+    if ex_inds:
+        df = df[~df["industry"].astype(str).isin(ex_inds)]
+
     # --- 合并行情：市值 + 流动性
     mkt = store.market_asof(asof)
     if mkt.empty:
