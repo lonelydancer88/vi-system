@@ -135,7 +135,12 @@ def parse_bench(md: str) -> dict:
 
 
 def extract_regime(md: str) -> str:
-    """从 backtest.md 抽取「分市场状态检验」表（hs300 版没有，避免重复）。"""
+    """从 backtest.md 抽取「分市场状态检验」表（hs300 版没有，避免重复）。
+
+    返回 **markdown 表格原文**，不是渲染好的 HTML —— 调用方会把它拼进 markdown
+    再统一交给 md_to_html()。若这里返回 HTML，会被 _inline() 转义成
+    `&lt;table&gt;...` 字面文本显示出来（2026-09-11 修掉的显示 bug）。
+    """
     if not md:
         return ""
     lines = md.split("\n")
@@ -148,7 +153,7 @@ def extract_regime(md: str) -> str:
                     tbl.append(lines[j].strip())
                 j += 1
             if tbl:
-                return _render_table(tbl)
+                return "\n".join(tbl)
     return ""
 
 
@@ -308,7 +313,7 @@ c_parts = [
     card("排雷明细（L3 · 含大模型复核判断）", vetoes),
     card("持仓建议（默认档 · 含手数）", advice),
     card("回测指标（含沪深300对比 + 分市场状态）",
-         bt_hs300["默认(30只)"] + "\n\n## 分市场状态检验（来自 backtest.md）\n\n"
+         bt_hs300["默认(30只)"] + "\n\n## 分市场状态检验\n\n"
          + (extract_regime(bt_plain["默认(30只)"]) or "（无）")),
     details("回测逐期明细（调仓 / 买卖原因 / 价格·收益·手数）", rep["默认(30只)"], scroll=False),
 ]
@@ -412,4 +417,8 @@ html = f"""<!doctype html>
 </div></body></html>"""
 
 (OUT / f"report-{ASOF}.html").write_text(html, encoding="utf-8")
+# 守卫：任何函数若把「渲染好的 HTML」当成 markdown 塞进 card/details，
+# _inline() 会把它转义成字面 &lt;table&gt; 文本（2026-09-11 分市场状态检验的显示 bug）。
+if "&lt;table" in html or "&lt;td" in html:
+    print("! 警告：检测到被转义的表格标记 —— 有函数把 HTML 混进了 markdown 渲染路径")
 print(f"→ out/report-{ASOF}.html  ({len(html)/1024:.0f} KB, nav-embedded={bool(nav_img)})")
