@@ -762,15 +762,30 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
         "> **原因口径**：「原因」为该动作在**同期截面**的信号——三支柱为**行业内中性 z**"
         "（相对同行标准差，过 AND 门需各柱 z≥0 即跑赢行业均值），排名越小越优。"
         f"{'（未记录因子面板，如需原因需以 with_panel=True 重跑）' if not _by else ''}", "",
-        "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 收益(含分红) | 价格收益 | 建仓日期 | 目标手数 | 占用资金(元) | 原因 |",
-        "|--------|------|------|------|------|---------|---------|------|--------|------------|---------|---------|---------|------------|------|",
     ]
+    MAIN_HDR = "| 调仓日 | 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 收益(含分红) | 价格收益 | 建仓日期 | 目标手数 | 占用资金(元) | 原因 |"
+    MAIN_SEP = "|--------|------|------|------|------|---------|---------|------|--------|------------|---------|---------|---------|------------|------|"
+    # 「无变动」/「其余 N 笔略」占位行按主表列数生成，避免行数与表头不一致
+    _phc = [c.strip() for c in MAIN_HDR.strip("|").split("|")]
+    def _ph_omit(d: str, text: str) -> str:
+        cells = ["…"] * len(_phc)
+        cells[0] = d
+        cells[3] = text
+        return "| " + " | ".join(cells) + " |"
+    first_blk = True
     for blk in ledger:
+        # 每个调仓期自成一张表：先写表头+分隔行。否则被中间的「本期持仓收益」
+        # 子表/引用块打断后，后续期行变成孤立行（GFM 不渲染为表格）。
+        if not first_blk:
+            lines.append("")
+        lines.append(MAIN_HDR)
+        lines.append(MAIN_SEP)
+        first_blk = False
         d = pd.to_datetime(blk["date"]).date().isoformat()
         order = {"建仓": 0, "清仓": 1, "增持": 2, "减持": 3}
         rows = sorted(blk["trades"], key=lambda r: (order.get(r["action"], 9), -abs(r["w_chg"])))
         if not rows:
-            lines.append(f"| {d} | — | — | （无变动） | — | — | — | — | — | — | — | — | — | — |")
+            lines.append(_ph_omit(d, "（无变动）"))
         shown = rows if top_n <= 0 else rows[:top_n]
         for r in shown:
             chg = f"+{r['w_chg']:.1%}" if r["w_chg"] >= 0 else f"{r['w_chg']:.1%}"
@@ -795,7 +810,7 @@ def trade_report(result: dict, store, top_n: int = 12, capital: float = 1_000_00
             )
         if top_n > 0 and len(rows) > top_n:
             lines.append(
-                f"| {d} | … | … | 其余 {len(rows) - top_n} 笔（增持/减持）略 | … | … | … | … | … | … | … | … | … | … |"
+                _ph_omit(d, f"其余 {len(rows) - top_n} 笔（增持/减持）略")
             )
         # —— 本期持仓收益快照：调仓时每只股票目前的收益（相对首次建仓真实价）——
         snap = blk.get("snap", [])
@@ -973,7 +988,7 @@ def _valuation_from(g: pd.DataFrame | None, date, code: str) -> str:
         fb = r.get("fcf_is_fallback", False)
         if isinstance(fb, (bool, np.bool_)) and bool(fb):
             parts.append("FCF为净利兜底")
-    return "｜".join(parts)
+    return "；".join(parts)
 
 
 def _reason_cell(by_date: dict, date, code: str, action: str,
@@ -991,7 +1006,7 @@ def _reason_cell(by_date: dict, date, code: str, action: str,
                 return det
         return why
     vtxt = _valuation_from(by_date.get(pd.Timestamp(date)), date, code)
-    return f"{why}｜估值 {vtxt}" if vtxt else why
+    return f"{why}；估值 {vtxt}" if vtxt else why
 
 
 def _panel_rej_by_date(panel_rej: pd.DataFrame | None) -> dict:
@@ -1103,8 +1118,8 @@ def trade_reasons_report(result: dict, store, top_n: int = 0) -> str:
                 rr = rec_by.loc[pd.Timestamp(d)]
                 if isinstance(rr, pd.DataFrame):
                     rr = rr.iloc[0]
-                rmeta = (f"｜本期组合收益 {float(rr['port_ret']):+.1%}"
-                         f"｜换手 {float(rr['turnover']):.0%}")
+                rmeta = (f"；本期组合收益 {float(rr['port_ret']):+.1%}"
+                         f"；换手 {float(rr['turnover']):.0%}")
             except Exception:
                 pass
         show = rows if top_n <= 0 else rows[:top_n]
