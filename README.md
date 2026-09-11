@@ -1,5 +1,10 @@
 # 价值投资选股系统（vi_system）
 
+**An A-share (China) value-investing stock screener and point-in-time backtester** —
+three-pillar fundamental factors (value / quality / safety), reverse-DCF valuation,
+portfolio construction, financial-fraud screening (排雷), and look-ahead bias testing.
+基于 Graham–Buffett 价值投资框架与老唐估值法，用 Python 实现，数据源无需 token。
+
 设计方案见 [`价值投资选股系统设计方案.md`](价值投资选股系统设计方案.md)。
 本目录是方案的可运行实现。
 
