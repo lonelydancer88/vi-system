@@ -1,15 +1,17 @@
-"""生成「回测报告」：逐期交易动作 / 持仓 / 买入原因 / 卖出原因。
+"""生成「回测报告」：逐期交易动作 / 持仓 / 买入原因 / 卖出原因，并内嵌交易台账列。
 
 用法
 ----
     PYTHONPATH=. python3 tests/gen_backtest_report.py            # 5 只版
     PYTHONPATH=. python3 tests/gen_backtest_report.py --holdings 30
 
-区别于 backtest.md（只有业绩统计）/ trades.md（台账）/ reasons.md（仅变动）：
-本报告把三期信息合到一期一节的叙述式报告 —— 每期给出
-  ① 调仓动作（买入/卖出逐笔，含买入/卖出原因 = L4 三支柱 z + 排名 + L5 估值）
+区别于 backtest.md（只有业绩统计）：
+本报告把每期信息合到一期一节的叙述式报告 —— 每期给出
+  ① 调仓动作（买入/卖出逐笔，含原因 = L4 三支柱 z + 排名 + L5 估值，以及
+     真实价 / 收益(含分红) / 价格收益 / 建仓日期 / 目标手数 / 占用资金 —— 即原 trades.md 台账列）
   ② 期末持仓（权重 / 现价 / 建仓价 / 价格收益 / 持有收益(含分红)）
 信号与原因均取「该调仓日同期」的因子面板，与回测口径一致、可追溯。
+（原 trades.md 已并入本报告的调仓动作表，不再单独生成。）
 """
 from __future__ import annotations
 
@@ -61,7 +63,8 @@ def main():
     ledger = bt.trade_ledger(r, st)
     eff = r.get("effective_start", "")
 
-    L = [f"# 回测报告（最多持有 {args.holdings} 只）", "",
+    cap = "默认(最多约30只)" if args.holdings in (None, 0) else f"最多持有 {args.holdings} 只"
+    L = [f"# 回测报告（{cap}）", "",
          f"> 数据口径：`{args.db}`；实算起点 **{eff}**（剔除期初空仓期）；"
          f"调仓 5/9/11 月 15 日（年报+一季报 / 中报 / 三季报披露后），共 {len(ledger)} 期。",
          f"> 净值/收益用后复权价（含分红再投）；价格取真实不复权收盘价 `close_raw`。"
@@ -85,7 +88,8 @@ def main():
           f"| 平均持仓数 | {st_.get('avg_holdings', float('nan')):.1f} | — |", "",
           "**净值曲线**", "",
           "![净值曲线（30只/5只/3只/等权/沪深300 对比）](./nav-curve.png)",
-          "> 图中含 30只 / 5只 / 3只 / 等权全市场 / 沪深300 五条累计净值；本报告对应**策略 5 只**档。", ""]
+          "> 图中含 30只 / 5只 / 3只 / 等权全市场 / 沪深300 五条累计净值；"
+          f"本报告对应**策略 {('30只' if args.holdings in (None, 0) else str(args.holdings) + '只')}**档。", ""]
 
     # ---------------- 逐期
     rec = r["records"].set_index("date") if r.get("records") is not None else None
@@ -105,43 +109,35 @@ def main():
         L += ["---", "", f"## 第 {n} 期：{d.date()}（{meta}）", ""]
 
         trades = [t for t in blk["trades"] if t["action"] != "持有"]
-        # ---------- 买入/卖出动作与原因
+        # ---------- 买入/卖出动作与原因（含价格/收益/手数/占用，即原 trades.md 台账列）
         if trades:
             L += ["**调仓动作**", "",
-                  "| 动作 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 买入/卖出原因 |",
-                  "|------|------|------|---------|---------|------|-------------|"]
+                  "| 动作 | 代码 | 名称 | 行业 | 上期权重 | 目标权重 | 变动 | 真实价 | 收益(含分红) | 价格收益 | 建仓日期 | 目标手数 | 占用资金(元) | 买入/卖出原因 |",
+                  "|------|------|------|------|---------|---------|------|--------|------------|---------|---------|---------|------------|-------------|"]
             for t in sorted(trades, key=lambda x: ({"建仓": 0, "清仓": 1,
                                                     "增持": 2, "减持": 3}.get(x["action"], 9),
                                                     -abs(x["w_chg"]))):
                 chg = f"{t['w_chg']:+.1%}"
                 why = bt._reason_cell(by_date, d, t["code"], t["action"], by_rej, st)
-                w = t.get("w_new", 0.0)
-                cap_note = ""
-                if t["action"] in ("建仓", "增持") and np.isfinite(t.get("price", np.nan)) and t["price"] > 0:
-                    lots = int(w * args.capital / t["price"] / 100)
-                    cap_note = f"（{lots} 手≈{lots * 100 * t['price']:,.0f} 元）" if lots > 0 else ""
-                L.append(f"| {t['action']} | {t['name']} | {t.get('industry', '')} | "
-                         f"{t['w_prev']:.1%} | {t['w_new']:.1%} | {chg} | {why}{cap_note} |")
-            L.append("")
-
-        # ---------- 当期卖出（清仓/减持）已实现盈亏
-        sells = [t for t in trades if t["action"] in ("清仓", "减持")]
-        if sells:
-            L += ["**当期卖出（已实现盈亏）**", "",
-                  "| 名称 | 行业 | 动作 | 卖出价 | 建仓日期 | 建仓成本 | 价格收益 | 已实现收益(含分红) |",
-                  "|------|------|------|--------|---------|---------|---------|-----------|"]
-            for t in sorted(sells, key=lambda x: x["action"]):
-                prc = t.get("price")
-                cst = t.get("cost")
-                rtv = t.get("ret")
-                rpv = t.get("ret_price")
-                prc_f = f"{prc:.2f}" if (prc is not None and np.isfinite(prc)) else "—"
-                cst_f = f"{cst:.2f}" if (cst is not None and np.isfinite(cst)) else "—"
-                rtv_f = f"{rtv:+.1%}" if (rtv is not None and np.isfinite(rtv)) else "—"
-                rpv_f = f"{rpv:+.1%}" if (rpv is not None and np.isfinite(rpv)) else "—"
-                ed_f = t.get("entry_date") or "—"
-                L.append(f"| {t['name']} | {t.get('industry', '')} | {t['action']} | "
-                         f"{prc_f} | {ed_f} | {cst_f} | {rpv_f} | {rtv_f} |")
+                p = float(t["price"]) if np.isfinite(t.get("price", np.nan)) else np.nan
+                price_s = f"{p:.2f}" if np.isfinite(p) else "—"
+                rt = t.get("ret", np.nan)
+                ret_s = f"{rt:+.1%}" if (rt is not None and np.isfinite(rt)) else "—"
+                rp = t.get("ret_price", np.nan)
+                rp_s = f"{rp:+.1%}" if (rp is not None and np.isfinite(rp)) else "—"
+                ed = t.get("entry_date")
+                entry_s = ed if ed else "—"
+                lots = cost = 0
+                if np.isfinite(p) and p > 0 and t["w_new"] > 1e-9:
+                    lots = int(t["w_new"] * args.capital / p / 100)
+                    cost = lots * 100 * p
+                lots_s = f"{lots}" if lots > 0 else "—"
+                cost_s = f"{cost:,.0f}" if cost > 0 else "—"
+                L.append(
+                    f"| {t['action']} | {t['code']} | {t['name']} | {t.get('industry', '')} | "
+                    f"{t['w_prev']:.1%} | {t['w_new']:.1%} | {chg} | {price_s} | {ret_s} | {rp_s} | "
+                    f"{entry_s} | {lots_s} | {cost_s} | {why} |"
+                )
             L.append("")
 
         # ---------- 期末持仓

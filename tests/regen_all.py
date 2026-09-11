@@ -18,15 +18,18 @@
 生成清单
 --------
     0  预热 screen 缓存   data/real_universe/.screen_cache/
-    1  回测各档           out/backtest.md、backtest-top{3,5,30}.md、
-                          out/backtest-hs300.md、backtest-hs300-top{3,5,30}.md
-    2  回测报告           out/回测报告-top{3,5,30}-{asof}.md
-    3  交易台账           out/trades.md、trades-top{3,5,30}.md
-    4  当前截面           out/vetoes-{asof}.md（已含「复核判断」列）、
+    1  回测各档           out/backtest.md、backtest-top{3,5}.md、
+                          out/backtest-hs300.md、backtest-hs300-top{3,5}.md
+                          （默认档 = 30只，用「无后缀」文件名承载，不再有 top30）
+    2  回测报告           out/回测报告-{asof}.md（默认/30只）、
+                          out/回测报告-top{3,5}-{asof}.md
+                          （逐期「调仓动作」表已内嵌价格/收益/手数/占用列，
+                          即原 trades 台账合并而来，不再单独生成 trades*.md）
+    3  当前截面           out/vetoes-{asof}.md（已含「复核判断」列）、
                           out/valuation-{asof}.md、out/portfolio-{asof}.md
-    5  持仓 / 集中组合     out/持仓建议-{asof}.md、out/portfolio-top{3,5}-{asof}.md
-    6  净值曲线           out/nav-curve.png
-    7  HTML 汇总          out/report-{asof}.html
+    4  持仓 / 集中组合     out/持仓建议-{asof}.md、out/portfolio-top{3,5}-{asof}.md
+    5  净值曲线           out/nav-curve.png
+    6  HTML 汇总          out/report-{asof}.html
 
 有意排除的产物
 --------------
@@ -34,6 +37,8 @@
                         默认持仓口径）。需要时手动跑：cli backtest --split
     建仓清单-*.md       与「持仓建议」同组合，仅多实时行情价/涨跌列，且价格来自
                         qt.gtimg.cn（非 point-in-time、不可复现）。手动跑 gen_position_list.py
+    trades*.md          其价格/收益/手数/占用列已并入「回测报告」的调仓动作表，
+                        二者底层同源（trade_ledger），不再单独生成。
     reasons*.md         与 trades 台账底层同函数、信息零差。
     annotate_vetoes.py  cli screen 的 _veto_md 已原生输出「复核判断」列，该脚本冗余。
 """
@@ -51,7 +56,7 @@ DB = "data/real_universe"
 OUT = "out"
 PY = sys.executable or "python3"
 
-TIERS = (None, 3, 5, 30)
+TIERS = (None, 3, 5)
 
 
 def _asof_from_db(db: str) -> str:
@@ -135,7 +140,7 @@ def main() -> int:
         run([PY, "tests/warm_screen_cache.py", "--db", db, "--asof", asof],
             "0 预热 screen 缓存", res, env, args.dry_run, args.keep_going)
 
-    # ---- 1 回测各档（默认 / 3只 / 5只 / 30只），各带沪深300基准对比
+    # ---- 1 回测各档（默认 / 3只 / 5只，各带沪深300基准对比；默认档即 30只、无后缀）
     for mh in TIERS:
         nm = _tier_name(mh)
         run(cli + ["backtest"] + _tier_args(mh) + ["--benchmark", "sh000300",
@@ -143,31 +148,27 @@ def main() -> int:
             f"1 回测·{nm}", res, env, args.dry_run, args.keep_going)
 
     # ---- 2 回测报告（逐期调仓动作 / 持仓 / 买卖原因）
-    for mh in (3, 5, 30):
+    # 默认档用 --holdings 0（= 配置 [20,30]，文件名无后缀）；3/5 档用 --holdings N
+    for mh in (0, 3, 5):
+        nm = "默认(30只)" if mh == 0 else f"top{mh}"
         run([PY, "tests/gen_backtest_report.py", "--db", db, "--holdings", str(mh)],
-            f"2 回测报告·top{mh}", res, env, args.dry_run, args.keep_going)
+            f"2 回测报告·{nm}", res, env, args.dry_run, args.keep_going)
 
-    # ---- 3 交易台账（reasons 已并入，不再单列）
-    for mh in TIERS:
-        nm = _tier_name(mh)
-        run(cli + ["trades"] + _tier_args(mh) + ["--out", OUT],
-            f"3 交易台账·{nm}", res, env, args.dry_run, args.keep_going)
-
-    # ---- 4 当前截面：vetoes（含「复核判断」列）/ valuation / portfolio —— HTML 依赖这三件
+    # ---- 3 当前截面：vetoes（含「复核判断」列）/ valuation / portfolio —— HTML 依赖这三件
     run(cli + ["screen", "--asof", asof, "--top", "30", "--out", OUT],
-        "4 当前截面 screen", res, env, args.dry_run, args.keep_going)
+        "3 当前截面 screen", res, env, args.dry_run, args.keep_going)
 
-    # ---- 5 持仓建议（默认档）+ 集中组合（3只 / 5只）
+    # ---- 4 持仓建议（默认档）+ 集中组合（3只 / 5只）
     run([PY, "tests/gen_position_advice.py", "--asof", asof],
-        "5 持仓建议", res, env, args.dry_run, args.keep_going)
+        "4 持仓建议", res, env, args.dry_run, args.keep_going)
     run([PY, "tests/gen_concentrated.py", "--db", db, "--asof", asof, "--n", "3,5"],
-        "5 集中组合 top3/5", res, env, args.dry_run, args.keep_going)
+        "4 集中组合 top3/5", res, env, args.dry_run, args.keep_going)
 
-    # ---- 6 净值曲线（只出 nav-curve.png，不含历史遗留的手数表）
-    run([PY, "tests/regen_charts.py"], "6 净值曲线", res, env,
+    # ---- 5 净值曲线（只出 nav-curve.png，不含历史遗留的手数表）
+    run([PY, "tests/regen_charts.py"], "5 净值曲线", res, env,
         args.dry_run, args.keep_going)
 
-    # ---- 7 HTML 汇总（读 backtest-hs300.md + portfolio/valuation/vetoes-{asof}.md）
+    # ---- 6 HTML 汇总（读 backtest-hs300.md + portfolio/valuation/vetoes-{asof}.md）
     run([PY, "tests/gen_html_report.py", asof], "7 HTML 汇总", res,
         env, args.dry_run, args.keep_going)
 
