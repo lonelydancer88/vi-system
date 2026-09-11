@@ -118,21 +118,8 @@ def cmd_screen(args):
 
 
 def _veto_md(rejected: pd.DataFrame) -> str:
-    from .pipeline.vetoes import veto_summary
-    if rejected.empty:
-        return "# 排雷报告\n\n无否决记录"
-    s = veto_summary(rejected)
-    lines = ["# 排雷报告（L3）", "", f"共否决 {len(rejected)} 只", "",
-             "| 规则 | 说明 | 数量 | 占比 |", "|------|------|------|------|"]
-    for _, r in s.iterrows():
-        lines.append(f"| {r['rule']} | {r['rule_desc']} | {r['n']} | {r['share']:.1%} |")
-    lines += ["", "## 明细", "", "| 代码 | 名称 | 行业 | 触发 | 实际值 | 阈值 |",
-              "|------|------|------|---------|--------|------|"]
-    for _, r in rejected.iterrows():
-        v = r["value"]
-        v = f"{v:.3f}" if isinstance(v, float) else str(v)
-        lines.append(f"| {r['code']} | {r['name']} | {r['industry']} | {r['rule_desc']} | {v} | {r['threshold']} |")
-    return "\n".join(lines)
+    from .pipeline.veto_judge import veto_report_md
+    return veto_report_md(rejected)
 
 
 def cmd_portfolio(args):
