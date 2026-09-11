@@ -108,7 +108,7 @@ def apply_vetoes(metrics: pd.DataFrame, cfg: Config):
                 nd = row.get("net_debt_ebitda")
                 ic = row.get("interest_coverage")
                 if pd.notna(nd) and nd > lc.get("net_debt_ebitda_max", 5.0):
-                    hit = ("leverage", "净负债/EBITDA 过高", nd, lc.get("net_debt_ebitda_max"))
+                    hit = ("leverage", "净负债/EBITDA 过高", nd, lc.get("net_debt_ebitda_max", 5.0))
                 elif pd.notna(ic) and ic < lc.get("interest_coverage_min", 2.0):
                     hit = ("leverage", "利息覆盖倍数不足", ic, lc.get("interest_coverage_min"))
 

@@ -49,7 +49,7 @@ vetoes:
       max: 0.50                     # 5年股本膨胀上限（放宽：原0.20把送转/可转债转股等正常股本增长也误判为稀释）
     leverage:
       enabled: true
-      net_debt_to_ebitda_max: 5.0
+      net_debt_ebitda_max: 5.0
       interest_coverage_min: 2.0
       # 重资产/资本密集行业高负债为常态（受监管、现金流稳定），净负债/EBITDA 阈值对其系统性误杀
       skip_industries: ["银行", "保险", "证券", "多元金融", "公用事业", "房地产", "建筑装饰", "交通运输", "钢铁", "环保"]
