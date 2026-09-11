@@ -177,6 +177,16 @@ def card(title: str, md: str, anchor: str | None = None) -> str:
     return f'<div class="card"{a}><h2>{title}</h2>{md_to_html(md)}</div>'
 
 
+def fold_card(title: str, md: str, anchor: str | None = None,
+              open_: bool = True) -> str:
+    """可折叠的 card：标题即 <summary>，默认展开（open_=False 则默认收起）。"""
+    a = f' id="{anchor}"' if anchor else ""
+    o = " open" if open_ else ""
+    return (f'<details class="card"{a}{o}>'
+            f'<summary class="card-h">{title}</summary>'
+            f'<div class="fold-body">{md_to_html(md)}</div></details>')
+
+
 def details(summary: str, md: str, scroll: bool = False) -> str:
     cls = ' class="scroll"' if scroll else ""
     return (f'<details><summary>{summary}</summary>'
@@ -272,18 +282,19 @@ ov_html = (
 
 
 # ---------------- 三策略区块 ----------------
-def strategy_block(anchor, title, tiers):
-    """tiers: dict with keys used inside; here we build a 30只/集中 区块。"""
+def strategy_block(anchor, title, tiers, open_: bool = True):
+    """整个策略区块本身可折叠：标题 = <summary>，默认展开。"""
+    o = " open" if open_ else ""
     return (
-        f'<section class="strat" id="{anchor}">'
-        f'<h2 class="strat-h">{title}</h2>' + "".join(tiers) + "</section>"
+        f'<details class="strat" id="{anchor}"{o}>'
+        f'<summary class="strat-h">{title}</summary>' + "".join(tiers) + "</details>"
     )
 
 
 # 策略 A / B 共用构造器（集中组合）
 def concentrated_block(anchor, title, key):
     parts = [
-        card(f"{title} · 持仓明细（L6）", port[key]),
+        fold_card(f"{title} · 持仓明细（L6）", port[key]),
         card(f"{title} · 回测指标（含沪深300对比）",
              bt_plain[key] + "\n\n" + bt_hs300[key]),
         details(f"{title} · 回测逐期明细（调仓 / 买卖原因 / 价格·收益·手数）", rep[key], scroll=False),
@@ -296,7 +307,7 @@ block_b = concentrated_block("sec-b", "策略 B：top5 集中组合", "top5")
 
 # 策略 C：默认档（30只）
 c_parts = [
-    card("持仓明细（L6 · 30只）", port["默认(30只)"], anchor="sec-c"),
+    fold_card("持仓明细（L6 · 30只）", port["默认(30只)"]),
     card("估值与买卖点（L5）", valuation),
     card("排雷明细（L3 · 含大模型复核判断）", vetoes),
     card("持仓建议（默认档 · 含手数）", advice),
@@ -305,10 +316,7 @@ c_parts = [
          + (extract_regime(bt_plain["默认(30只)"]) or "（无）")),
     details("回测逐期明细（调仓 / 买卖原因 / 价格·收益·手数）", rep["默认(30只)"], scroll=False),
 ]
-block_c = strategy_block("sec-c-wrap", "策略 C：默认档（30只）", c_parts)
-
-# 注：上面 card 已给 C1 加了 id=sec-c，外层 section 用 sec-c-wrap 避免冲突
-block_c = block_c.replace('id="sec-c-wrap"', 'id="sec-c"')
+block_c = strategy_block("sec-c", "策略 C：默认档（30只）", c_parts)
 
 # ---------------- 组装 HTML ----------------
 n_fold = (block_a + block_b + block_c).count("<details")
@@ -351,7 +359,10 @@ html = f"""<!doctype html>
   summary {{ cursor:pointer; font-weight:600; padding:8px 0; color:var(--ink);
             user-select:none; }}
   summary:hover {{ color:var(--accent); }}
-  details[open] > summary {{ color:var(--accent); margin-bottom:6px; }}
+  details:not(.card)[open] > summary {{ color:var(--accent); margin-bottom:6px; }}
+  details.strat > summary {{ padding:2px 0; }}
+  details.card > summary {{ font-size:17px; padding:2px 0; }}
+  .fold-body {{ margin-top:10px; }}
   .toolbar {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap;
              margin:-10px 0 20px; font-size:12.5px; color:var(--sub); }}
   .toolbar button {{ font:inherit; font-size:13px; padding:6px 13px; border-radius:8px;
@@ -380,7 +391,7 @@ html = f"""<!doctype html>
   <div class="toolbar">
     <button type="button" onclick="document.querySelectorAll('details').forEach(function(d){{d.open=true}})">全部展开</button>
     <button type="button" onclick="document.querySelectorAll('details').forEach(function(d){{d.open=false}})">全部折叠</button>
-    <span>共 {n_fold} 段「回测逐期明细」可折叠 —— 点标题展开，再点一下即收回。</span>
+    <span>共 {n_fold} 个折叠区块（策略整块 / 持仓明细 / 回测逐期明细）—— 点标题展开，再点一下即收回。</span>
   </div>
 
   <div class="card"><h2>① 五策略对比总览（3 策略 vs 2 基准）</h2>
