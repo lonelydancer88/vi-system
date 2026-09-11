@@ -4,9 +4,9 @@
 # 改参数必须新增版本（version + effective_date），禁止原地修改。
 # ============================================================
 
-version: "1.5"
+version: "1.6"
 effective_date: "2026-09-11"
-note: "v1.1 修正重资产行业排雷误杀。v1.2 评分体系重构落地配置：三支柱门槛由行业内百分位 pct>=30 改为行业内中性 z>=z_threshold（默认 0，即每柱跑赢行业均值）；移除已废弃的 percentile_floor；敏感性检验参数同步更新（percentile_floor 已死参数 → winsorize）。另：本次随代码修复了 skip_empty 基准未重新锚定、换手漂移被覆盖两个回测 bug。v1.3 新增 portfolio.exclude_at_sell_point（默认 true）。v1.4 曾实验组合层粘性持有（sticky_holding=true / sticky_margin=0.10）与集中档限仓 concentrated_cap=0.25：**回测表明粘性是负优化**——top3 年化 11.66%→7.04%、top5 15.33%→9.72%、30只 15.99%→15.72%，集中档几近崩盘；原因：高换手是策略捕捉价值因子（弱 alpha）的轮换机制本身，并非纯摩擦，冻住即失去边缘；限仓 25% 还给 top3 加了 ~32% 现金拖累。故 v1.5 回退 sticky_holding=false、concentrated_cap=0.35，恢复 v1.3 缓冲区/限仓行为。粘性逻辑仍保留于 constructor.py（配置门控）供未来实验。注：等权基准本就用 close_adj（后复权、含分红），已是总收益口径。"
+note: "v1.1 修正重资产行业排雷误杀。v1.2 评分体系重构落地配置：三支柱门槛由行业内百分位 pct>=30 改为行业内中性 z>=z_threshold（默认 0，即每柱跑赢行业均值）；移除已废弃的 percentile_floor；敏感性检验参数同步更新（percentile_floor 已死参数 → winsorize）。另：本次随代码修复了 skip_empty 基准未重新锚定、换手漂移被覆盖两个回测 bug。v1.3 新增 portfolio.exclude_at_sell_point（默认 true）。v1.4 曾实验组合层粘性持有（sticky_holding=true / sticky_margin=0.10）与集中档限仓 concentrated_cap=0.25：**回测表明粘性是负优化**——top3 年化 11.66%→7.04%、top5 15.33%→9.72%、30只 15.99%→15.72%，集中档几近崩盘；原因：高换手是策略捕捉价值因子（弱 alpha）的轮换机制本身，并非纯摩擦，冻住即失去边缘；限仓 25% 还给 top3 加了 ~32% 现金拖累。故 v1.5 回退 sticky_holding=false、concentrated_cap=0.35，恢复 v1.3 缓冲区/限仓行为。粘性逻辑仍保留于 constructor.py（配置门控）供未来实验。注：等权基准本就用 close_adj（后复权、含分红），已是总收益口径。v1.6 组合层新增 L5 卖点硬纪律（portfolio.sell_at_sell_point=true）：已到卖点（市值≥v_mid×1.5）的现持仓在调仓时强制清仓，覆盖滞后带保护，与买入侧 exclude_at_sell_point 对称闭环。"
 
 # ------------------------------------------------------------
 # L1 宇宙层
@@ -150,6 +150,10 @@ portfolio:
   # 实测圆通速递 verdict=已到卖点 仍以 5.24% 权重入选，即承认「好公司」却忽略「好价格」。
   # 这是**买入标准**而非卖出标准：已持仓的票走缓冲区逻辑，不因此被强制清仓。
   exclude_at_sell_point: true
+  # L5 卖点硬纪律（v1.6）：与买入侧对称 —— 已到卖点的**现持仓**在调仓时强制清仓，
+  # 覆盖滞后带（rank_keep / sticky keeper）保护。即估值纪律对买、卖两侧同时生效：
+  # 买入时不接已透支的票，持有时一旦透支立即离场。先到卖点者优先于排名缓冲被处理。
+  sell_at_sell_point: true
 
 # ------------------------------------------------------------
 # L7 监控层

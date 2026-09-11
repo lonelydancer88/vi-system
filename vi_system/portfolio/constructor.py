@@ -108,6 +108,8 @@ def build_portfolio(
     else:
         sell_cut = int(hi * sell_mult)
     ranks = df.set_index("code")["rank"]
+    verdict_map = df.set_index("code")["verdict"].to_dict() if "verdict" in df.columns else {}
+    sell_at_sp = bool(pcfg.get("sell_at_sell_point", False))
     keeper_codes: set[str] = set()
     if current_weights is not None and len(current_weights) > 0:
         cur = current_weights[current_weights > 0]
@@ -118,6 +120,12 @@ def build_portfolio(
             keeper_codes = rank_keep | gate_keep
         else:
             keeper_codes = rank_keep
+        # L5 卖点硬纪律（v1.6）：已到卖点的现持仓强制清仓，覆盖滞后带保护，
+        # 与买入侧 exclude_at_sell_point 形成对称闭环。这些票已从 cand 剔除（不会回买），
+        # 此处仅确保不被保留为 keeper —— 即调仓时离场。
+        if sell_at_sp:
+            sp_holdings = {c for c in cur.index if verdict_map.get(c) == "已到卖点"}
+            keeper_codes -= sp_holdings
 
     # ---------------------------------------------------------- 行业配额式选股
     # 关键设计：行业上限在**选股阶段**用配额实现，而不是事后压缩权重。

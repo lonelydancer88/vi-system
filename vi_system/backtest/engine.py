@@ -953,6 +953,8 @@ def _action_reason_from(by_date: dict, date, code: str, action: str) -> str:
         return (f"当期三支柱未全过 z≥0 门槛（价值z {v}/质量z {q}/安全z {ss}）"
                 "仍入选（候选不足等例外通道）")
     if action == "清仓":
+        if r.get("verdict") == "已到卖点":
+            return ("估值到卖点（市值≥v_mid×1.50），触发 L5 硬纪律强制清仓")
         if not gate:
             return (f"当期三支柱跌破行业均值 z≥0（价值z {v}/质量z {q}/安全z {ss}），"
                     f"排名 {rk_txt}，被清出")
