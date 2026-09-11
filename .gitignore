@@ -45,3 +45,6 @@ data/real_universe/prices_adj_backup_*.parquet
 /data/*/*.corrupt
 /data/*/sina_fetch*.log
 /data/*/*.tmp
+
+# screen_at 持久化缓存（落盘中间产物，可用 tests/warm_screen_cache.py 重建）
+/data/*/.screen_cache/

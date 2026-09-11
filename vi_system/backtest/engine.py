@@ -49,8 +49,14 @@ def clear_screen_cache() -> None:
 
 
 def screen_at(store, asof, cfg: Config, with_valuation: bool = False):
-    """在 asof 时点跑完 L1→L5，返回 (scored_or_valued, rejected, universe)。"""
-    key = (str(asof), bool(with_valuation))
+    """在 asof 时点跑完 L1→L5，返回 (scored_or_valued, rejected, universe)。
+
+    with_valuation 仅影响「是否要求返回估值列」的语义；为缓存复用，内部统一
+    计算并缓存「带估值」版本（估值只加列、不影响过门/权重），False 调用方直接
+    复用同一份缓存，避免 run_backtest(默认 False) 与预热(True) 因 key 不同而
+    全量重算。
+    """
+    key = (str(asof),)
     hit = _SCREEN_CACHE.get(key)
     if hit is not None:
         scored, rejected, uni = hit
@@ -59,15 +65,22 @@ def screen_at(store, asof, cfg: Config, with_valuation: bool = False):
     uni = _universe.build_universe(store, asof, cfg)
     if uni.empty:
         return pd.DataFrame(), pd.DataFrame(), uni
-    m = _metrics.compute_metrics(store.facts_asof(asof), store.market_asof(asof), uni)
-    if m.empty:
-        return pd.DataFrame(), pd.DataFrame(), uni
-    passed, rejected = _vetoes.apply_vetoes(m, cfg)
-    if passed.empty:
-        return pd.DataFrame(), rejected, uni
-    scored = _factors.score_factors(passed, cfg)
-    if with_valuation:
-        scored = _valuation.valuate(scored, cfg)
+
+    def _compute():
+        m = _metrics.compute_metrics(store.facts_asof(asof), store.market_asof(asof), uni)
+        if m.empty:
+            return pd.DataFrame(), pd.DataFrame(), uni
+        passed, rejected = _vetoes.apply_vetoes(m, cfg)
+        if passed.empty:
+            return pd.DataFrame(), rejected, uni
+        scored = _factors.score_factors(passed, cfg)
+        scored = _valuation.valuate(scored, cfg)  # 统一带估值，供缓存复用
+        return scored, rejected, uni
+
+    # 持久化磁盘缓存：跨进程/次复用同一 asof 的筛选结果，避免四档回测与多次
+    # 重跑串行累计超时（详见 vi_system/pipeline/screen_cache）。
+    from ..pipeline.screen_cache import get_screen
+    scored, rejected, uni = get_screen(store, asof, cfg, _compute, with_valuation=True)
     _SCREEN_CACHE[key] = (scored, rejected, uni)
     return scored, rejected, uni
 
