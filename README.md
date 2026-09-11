@@ -267,6 +267,23 @@ vi_system/
 （三档回测报告）、`gen_concentrated.py`（Top5/Top3 集中组合）、`gen_position_advice.py`
 （今日持仓建议 + 手数）、`regen_nav_curve.py`（五线净值曲线还原）。
 
+**数据或策略改动后，跑这一个脚本即可刷新全部产物**：
+
+```bash
+python3 tests/regen_all.py              # 截面日自动取 prices.parquet 最新交易日
+python3 tests/regen_all.py --dry-run    # 只看将要执行的命令
+python3 tests/regen_all.py --skip-warm  # 缓存已新鲜时跳过预热（省 ~7 分钟）
+```
+
+它按固定顺序执行：预热缓存 → 回测四档（默认/3/5/30，含沪深300对比）→ 回测报告
+三档 → 交易台账四档 → 当前截面（vetoes 含「复核判断」列 / valuation / portfolio）
+→ 持仓建议 + 集中组合 → 净值曲线 → HTML 汇总。**所有产物的截面日由脚本统一推导
+并显式传入**，避免各脚本默认值不一致导致「有的报告停在昨天」。
+
+有意不纳入该脚本的产物：`backtest-split.md`（样本内外验证，研究型，手动跑
+`cli backtest --split`）、`建仓清单-*.md`（价格取自实时行情、不可复现，手动跑
+`gen_position_list.py`）、`reasons*.md`（与 trades 信息零差）。
+
 ---
 
 ## 六、四条不能破的规矩

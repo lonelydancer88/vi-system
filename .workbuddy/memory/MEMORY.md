@@ -24,6 +24,32 @@
   写成 `cli backtest --db X` 会报 `unrecognized arguments`
 - 真实数据库目录：`data/real_universe`（807 只财务 + 沪深300 行情）
 
+### 一键重生成产物（2026-09-11 建立）
+**数据或策略（含 screening 代码）改动后，只跑这一个脚本**：
+```bash
+python3 tests/regen_all.py              # 截面日自动取 prices.parquet 最新交易日
+python3 tests/regen_all.py --dry-run    # 只看命令
+python3 tests/regen_all.py --skip-warm  # 缓存已新鲜时省 ~7 分钟
+```
+17 步：预热缓存 → 回测四档(默认/3/5/30 + 沪深300对比) → 回测报告三档 →
+trades 四档 → `cli screen`(vetoes/valuation/portfolio) → 持仓建议 + 集中组合 top3/5 →
+nav-curve.png → HTML 汇总。**ASOF 由脚本统一推导并显式传入**，禁止在各脚本里写死截面日。
+
+- **有意排除**（不纳入脚本，需要时手动跑）：
+  - `backtest-split.md` → `cli backtest --split`（样本内外验证，研究型；与 `--max-holdings` 不兼容）
+  - `建仓清单-*.md` → `gen_position_list.py`（价格取实时行情，非 point-in-time、不可复现）
+  - `reasons*.md` → 与 `trades` 信息零差，已废弃
+  - `annotate_vetoes.py` → 冗余，`cli screen` 的 `_veto_md` 已原生输出「复核判断」列
+- **产物去重结论**：`portfolio-{asof}.md`（组合权重，HTML 依赖）/ `持仓建议-{asof}.md`
+  （= 组合 + L5 估值列 + 手数，默认档）/ `portfolio-top{3,5}-{asof}.md`（集中档）三者
+  组合构成相同、各有侧重，**不要新增第四个同组合的排版文件**。
+- **缓存注意**：`data/*/.screen_cache/` 的 key 只含「数据 mtime + rules.yaml 指纹」，
+  **不含代码版本** —— 改了 screening 代码必须让 `warm_screen_cache.py` 走默认的「先清空」
+  路径（`--no-clear` 会静默复用旧代码结果）。
+- **后台运行**：必须 `subprocess.Popen(..., start_new_session=True)`；
+  `nohup ... &` 会被 Bash 会话回收。且子进程要传 `stdin=subprocess.DEVNULL`，
+  否则脱离会话后报 `init_sys_streams: Bad file descriptor`。
+
 ### 数据源
 - 腾讯自选股 `westock-data-skillhub`（npx 包，**无需 token**），适配器 `vi_system/data/westock.py`
 - 财报带 `InfoPublDate`（公告日）→ 可对齐 point-in-time，这是排雷/回测无前视偏差的地基

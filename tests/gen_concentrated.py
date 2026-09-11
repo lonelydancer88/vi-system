@@ -8,10 +8,16 @@
     N <= 5 时行业上限放宽到 0.5
 
 产出：out/portfolio-top{N}-{asof}.md，每个策略一个文件。
+
+用法
+----
+    python3 tests/gen_concentrated.py --asof 2026-09-07 --n 3,5
+    python3 tests/gen_concentrated.py --db data/real_universe --asof 2026-09-07 --n 5
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -26,10 +32,8 @@ from vi_system.backtest import engine as bt
 from vi_system.portfolio.constructor import build_portfolio
 
 
-ASOF = "2026-09-09"
 DB = "data/real_universe"
 OUT = Path("out")
-SIZES = [5, 3]
 
 
 def concentrated_cfg(cfg, n: int):
@@ -102,21 +106,41 @@ def report(pf: pd.DataFrame, scored: pd.DataFrame, n: int, mpos: float, asof: st
     return "\n".join(lines)
 
 
+def _latest_trading_day(db: str) -> str:
+    """截面日默认取库内最新交易日，与 regen_all / 其它报告口径一致。"""
+    import pandas as pd
+
+    p = pd.read_parquet(Path(db) / "prices.parquet", columns=["date"])
+    return str(pd.to_datetime(p["date"]).max().date())
+
+
 def main():
+    ap = argparse.ArgumentParser(description="生成集中持股版组合报告")
+    ap.add_argument("--db", default=DB, help=f"数据目录（默认 {DB}）")
+    ap.add_argument("--asof", default=None,
+                    help="截面日 YYYY-MM-DD（默认取库内最新交易日）")
+    ap.add_argument("--n", default="5,3",
+                    help="持股上限，逗号分隔（默认 5,3，与历史行为一致）")
+    args = ap.parse_args()
+
+    asof = args.asof or _latest_trading_day(args.db)
+    sizes = [int(x) for x in str(args.n).split(",") if str(x).strip()]
+
     cfg = load_config(None)
-    st = Store(DB)
-    scored, _, uni = bt.screen_at(st, ASOF, cfg, with_valuation=True)
+    st = Store(args.db)
+    scored, _, uni = bt.screen_at(st, asof, cfg, with_valuation=True)
     if scored.empty:
         print("无候选")
         return 1
-    print(f"宇宙 {len(uni)} → 通过排雷 {len(scored)} → 过 AND 门槛 {int(scored['passes_gate'].sum())}")
+    print(f"截面 {asof}：宇宙 {len(uni)} → 通过排雷 {len(scored)} → "
+          f"过 AND 门槛 {int(scored['passes_gate'].sum())}")
 
-    for n in SIZES:
+    for n in sizes:
         ccfg, mpos = concentrated_cfg(cfg, n)
         pf = build_portfolio(scored, ccfg)
         OUT.mkdir(exist_ok=True)
-        path = OUT / f"portfolio-top{n}-{ASOF}.md"
-        path.write_text(report(pf, scored, n, mpos, ASOF), encoding="utf-8")
+        path = OUT / f"portfolio-top{n}-{asof}.md"
+        path.write_text(report(pf, scored, n, mpos, asof), encoding="utf-8")
         cash = max(0.0, 1 - pf["weight"].sum()) if not pf.empty else 1.0
         print(f"→ {path}  持仓 {len(pf)} 只，现金 {cash:.1%}，单票上限 {mpos:.1%}")
     return 0
