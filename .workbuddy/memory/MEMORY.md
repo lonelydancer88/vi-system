@@ -4,11 +4,19 @@
 
 位置：`/Users/hpl/WorkBuddy/2026-09-07-15-54-23`
 
-### Git 仓库（2026-09-07 建立）
-- **远程**：`git@github.com:lonelydancer88/vi-system`（**私有**）
+### Git 仓库（2026-09-07 建立；2026-09-11 改名 + 转公开）
+- **远程**：`git@github.com:lonelydancer88/a-share-value-investing-system`（**PUBLIC 公开**）
+  - 原名 `vi-system`，2026-09-11 改为 `a-share-value-investing-system`（搜索优化）。
+    GitHub 自动 301 重定向旧地址，旧 clone 仍可 pull；本地 remote 已同步更新。
+  - ⚠️ 此前记忆记为"私有"，实测为 PUBLIC —— 策略代码与设计文档对外可见
+    （`data/` 已 gitignore，无数据泄露）。若需保密须手动转私有，但会失去公开搜索可见性。
 - GitHub 账号：`lonelydancer88`，`gh` CLI 已登录（ssh 协议，token 含 repo 权限）
 - 默认分支：`main`
 - 提交身份：hupenglong / hupenglong@kangfuzi.cn
+- **搜索可见性配置**（2026-09-11）：描述为中英双语关键词串；15 个 topics
+  （value-investing / a-shares / stock-screener / backtesting / point-in-time 等）；
+  README 首屏含英文关键词副标题。改仓库元数据用 `gh repo edit --description` 与
+  `gh api -X PUT repos/{owner}/{repo}/topics --input -`（传 `{"names":[...]}`）。
 
 ### 版本控制约定
 - **`data/` 整个目录已 gitignore**（约 90MB parquet，不入库）。重建方式：
