@@ -91,18 +91,33 @@ def build_portfolio(
     cand = cand.sort_values("total_score", ascending=False)
     ind_map = df.set_index("code")["industry"].to_dict()
 
-    # ---------------------------------------------------------- 缓冲区
-    buffer_sel: list[str] = []
+    # ---------------------------------------------------------- 粘性持有 / 缓冲区
+    # 设计（v1.4 新增 sticky_holding）：
+    #   现持仓只要「仍通过 AND 门（passes_gate）且未到 L5 卖点」就作为 keeper 保留，
+    #   不因排名小幅波动而被「挤出」。这是纯换手削减 —— keeper 集合是「旧缓冲区」的
+    #   **超集**，所以换手只会降、不会升。只有当某槽位空缺（keeper 被清出/失败）或新候选
+    #   分数高出最弱 keeper 达 sticky_margin 时，才允许新标的进入。
+    #   旧缓冲区（rank<=sell_mult×hi）保留为 fallback（sticky_holding=false 时启用），
+    #   以兼容不希望启用粘性持有的场景。
+    sticky_on = bool(buf.get("sticky_holding", True))
+    sticky_margin = float(buf.get("sticky_margin", 0.10))
+    # 滞后带：粘性开启时对集中档再加绝对下限（hi+12）；关闭时退回 v1.3 原值 hi×sell_mult，
+    # 保证 sticky_holding=false 时与历史基线完全一致（否则会残留更宽的滞后带）。
+    if sticky_on:
+        sell_cut = int(max(hi * sell_mult, hi + 12))
+    else:
+        sell_cut = int(hi * sell_mult)
+    ranks = df.set_index("code")["rank"]
+    keeper_codes: set[str] = set()
     if current_weights is not None and len(current_weights) > 0:
         cur = current_weights[current_weights > 0]
-        ranks = df.set_index("code")["rank"]
-        # 缓冲区：排名跌出 sell_mult×目标持股数才卖（尺度无关，不随候选池大小漂移）。
-        #
-        # 这里刻意**不要求持仓继续通过 AND 门槛**：AND 门槛是买入标准，不是卖出标准。
-        # 把它当卖出条件会让组合每期换掉大半（实测换手 60%+），
-        # 而基本面真正恶化由 L7 论文报警负责 —— 那是设计好的退出通道。
-        sell_cut = int(hi * sell_mult)
-        buffer_sel = [c for c in cur.index if c in ranks.index and ranks[c] <= sell_cut]
+        rank_keep = {c for c in cur.index if c in ranks.index and ranks[c] <= sell_cut}
+        if sticky_on:
+            # 仍过 AND 门（且不在卖点；cand 已含 exclude_at_sell_point 过滤）的现持仓 → 必留
+            gate_keep = set(cand[cand["code"].isin(cur.index)]["code"])
+            keeper_codes = rank_keep | gate_keep
+        else:
+            keeper_codes = rank_keep
 
     # ---------------------------------------------------------- 行业配额式选股
     # 关键设计：行业上限在**选股阶段**用配额实现，而不是事后压缩权重。
@@ -119,24 +134,46 @@ def build_portfolio(
         picked.append(code)
         return True
 
-    ranked = cand["code"].tolist()
-    # 1) 先放缓冲区保留的持仓（减少换手）
-    for c in buffer_sel:
+    score_of = cand.set_index("code")["total_score"].to_dict()
+    ranked = cand["code"].tolist()                     # 分数降序
+    ranked_new = [c for c in ranked if c not in keeper_codes]
+
+    # 1) 先放 keeper（按分数降序，保证填得满时优先保高分）
+    for c in sorted(keeper_codes, key=lambda x: -score_of.get(x, -1e9)):
         if len(picked) >= hi:
             break
         _try_add(c)
-    # 2) 补足到持股数下限
-    for c in ranked:
+    # 2) 补足到持股数下限（用新候选）
+    for c in ranked_new:
         if len(picked) >= lo:
             break
         if c not in picked:
             _try_add(c)
-    # 3) 仍有空间则继续按分数加满
-    for c in ranked:
+    # 3) 仍有空间则继续用新候选加满
+    for c in ranked_new:
         if len(picked) >= hi:
             break
         if c not in picked:
             _try_add(c)
+    # 4) 边际刷新（仅 sticky_on 且 sticky_margin>0）：新候选分数高出最弱 keeper 达 margin 才替换。
+    #    关闭粘性时整段跳过 —— 与 v1.3 行为完全一致。
+    if sticky_on and sticky_margin > 0:
+        for c in ranked_new:
+            if c in picked:
+                continue
+            if len(picked) < hi:                        # 空槽兜底（前三步应已填满）
+                _try_add(c)
+                continue
+            weak = min(picked, key=lambda x: score_of.get(x, -1e9))
+            weak_rank = ranks.get(weak, 1e9)
+            # 仅当最弱 keeper 已跌出滞后带（weak_rank>sell_cut）且新候选明显更优才替换：
+            # 滞内 keeper 永不因排名噪声被「挤出」，只有真正退化的持仓才让位给更优标的。
+            if weak_rank > sell_cut and score_of.get(c, -1e9) > score_of.get(weak, -1e9) + sticky_margin:
+                picked.remove(weak)
+                if not _try_add(c):                     # 行业上限挡住，回退并跳过此候选
+                    picked.append(weak)
+            else:
+                break
 
     sel_df = df[df["code"].isin(picked)].copy()
     if sel_df.empty:

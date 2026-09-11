@@ -181,7 +181,10 @@ def run_backtest(
         hi = int(max_holdings)
         concentrated = hi <= 5
         po = cfg.section("portfolio") or {}
-        mpos = max(float(po.get("max_position", 0.08)), min(0.35, 0.9 / hi * 1.1))
+        # v1.4：集中档单票上限天花板由硬编码 0.35 改为读取 concentrated_cap（默认 0.25），
+        # 仅约束单票、不影响 target_size；top3 由 0.33→0.25，top5(0.198) 不受影响。
+        cap_ceiling = float(po.get("concentrated_cap", 0.25))
+        mpos = max(float(po.get("max_position", 0.08)), min(cap_ceiling, 0.9 / hi * 1.1))
         overrides = {
             "portfolio.target_size": [1, hi],
             "portfolio.max_position": round(mpos, 4),
