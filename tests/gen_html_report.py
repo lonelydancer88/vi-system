@@ -3,6 +3,7 @@
 按「策略」组织：默认档 = 30只（无后缀文件名）；top3 / top5 集中组合各一区块。
 每区块内顺序固定：持仓 → 回测 → 逐期明细（调仓动作表已含价格/收益/手数/占用，即原 trades 台账合并而来）。
 顶部「五策略对比总览」= 3 个策略（top3 / top5 / 默认30只）+ 2 个基准（沪深300 / 等权全市场）。
+折叠：策略整块、每张内容卡片、回测逐期明细，三层均 <details> 可折（默认展开；逐期明细默认收起）。
 
 用法: python3 tests/gen_html_report.py [asof]
 输出: out/report-<asof>.html (内嵌 nav-curve.png base64，可直接双击/预览)
@@ -172,14 +173,9 @@ def nav_b64() -> str:
 
 
 # ---------------- 区块构件 ----------------
-def card(title: str, md: str, anchor: str | None = None) -> str:
-    a = f' id="{anchor}"' if anchor else ""
-    return f'<div class="card"{a}><h2>{title}</h2>{md_to_html(md)}</div>'
-
-
-def fold_card(title: str, md: str, anchor: str | None = None,
-              open_: bool = True) -> str:
-    """可折叠的 card：标题即 <summary>，默认展开（open_=False 则默认收起）。"""
+def card(title: str, md: str, anchor: str | None = None,
+         open_: bool = True) -> str:
+    """所有 card 统一可折叠：标题即 <summary>，默认展开（open_=False 则默认收起）。"""
     a = f' id="{anchor}"' if anchor else ""
     o = " open" if open_ else ""
     return (f'<details class="card"{a}{o}>'
@@ -294,7 +290,7 @@ def strategy_block(anchor, title, tiers, open_: bool = True):
 # 策略 A / B 共用构造器（集中组合）
 def concentrated_block(anchor, title, key):
     parts = [
-        fold_card(f"{title} · 持仓明细（L6）", port[key]),
+        card(f"{title} · 持仓明细（L6）", port[key]),
         card(f"{title} · 回测指标（含沪深300对比）",
              bt_plain[key] + "\n\n" + bt_hs300[key]),
         details(f"{title} · 回测逐期明细（调仓 / 买卖原因 / 价格·收益·手数）", rep[key], scroll=False),
@@ -307,7 +303,7 @@ block_b = concentrated_block("sec-b", "策略 B：top5 集中组合", "top5")
 
 # 策略 C：默认档（30只）
 c_parts = [
-    fold_card("持仓明细（L6 · 30只）", port["默认(30只)"]),
+    card("持仓明细（L6 · 30只）", port["默认(30只)"]),
     card("估值与买卖点（L5）", valuation),
     card("排雷明细（L3 · 含大模型复核判断）", vetoes),
     card("持仓建议（默认档 · 含手数）", advice),
@@ -391,7 +387,7 @@ html = f"""<!doctype html>
   <div class="toolbar">
     <button type="button" onclick="document.querySelectorAll('details').forEach(function(d){{d.open=true}})">全部展开</button>
     <button type="button" onclick="document.querySelectorAll('details').forEach(function(d){{d.open=false}})">全部折叠</button>
-    <span>共 {n_fold} 个折叠区块（策略整块 / 持仓明细 / 回测逐期明细）—— 点标题展开，再点一下即收回。</span>
+    <span>共 {n_fold} 个折叠区块（策略整块 / 每张内容卡片）—— 点任意标题展开，再点一下即收回。</span>
   </div>
 
   <div class="card"><h2>① 五策略对比总览（3 策略 vs 2 基准）</h2>
