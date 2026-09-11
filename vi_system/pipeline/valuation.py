@@ -66,7 +66,7 @@ def interpret_g(g: float) -> str:
 def valuate(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     """对因子层输出的候选表做估值。
 
-    新增列：fcf0, g_implied, v_bull, v_base, v_bear, v_mid,
+    新增列：fcf0, fcf_basis, g_implied, v_bull, v_base, v_bear, v_mid,
             buy_point, sell_point, downside_bear, verdict
     """
     if df.empty:
@@ -83,10 +83,24 @@ def valuate(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     fcf0 = out["ocf"] - out["capex"].fillna(0) if {"ocf", "capex"}.issubset(out.columns) else pd.Series(np.nan, index=out.index)
     # 现金流缺失时用净利润的 80% 兜底，并标注
     fallback = fcf0.isna() | (fcf0 <= 0)
+
+    # OCF 口径失真行业（银行 / 房地产 / 非银金融）：经营现金流里塞着客户存款、预售款
+    # （合同负债）等递延项，不是可自由支配的现金流。用它当永续 FCF 折现会系统性高估估值
+    # —— 实证：滨江集团 OCF 102 亿 / 净利仅 18 亿，FCF 达净利 6.3 倍，v_mid 给到市值 7.8 倍。
+    # 这些行业强制改用净利润口径，并以 fcf_basis=ni_forced 标注，便于下游识别。
+    ni_ratio = float(vcfg.get("fcf_ni_ratio", 0.8))
+    ni_inds = list(vcfg.get("fcf_ni_industries", []) or [])
+    forced = (out["industry"].isin(ni_inds)
+              if ("industry" in out.columns and ni_inds)
+              else pd.Series(False, index=out.index))
+
     if "net_income" in out.columns:
-        fcf0 = fcf0.where(~fallback, out["net_income"] * 0.8)
+        fcf0 = fcf0.where(~fallback, out["net_income"] * ni_ratio)
+        fcf0 = fcf0.where(~forced, out["net_income"] * ni_ratio)
     out["fcf0"] = fcf0
-    out["fcf_is_fallback"] = fallback
+    out["fcf_is_fallback"] = fallback | forced
+    out["fcf_basis"] = np.where(forced, "ni_forced",
+                                np.where(fallback, "ni_fallback", "ocf"))
 
     mkt = out["mktcap"]
     out["g_implied"] = [

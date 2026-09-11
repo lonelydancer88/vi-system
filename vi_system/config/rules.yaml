@@ -120,6 +120,12 @@ valuation:
   buy_discount: 0.70                # 买点 = 中枢 × 0.70
   sell_multiple: 1.50               # 卖点 = 中枢 × 1.50
   max_downside_bear: 0.25           # 悲观情景最大可容忍下行空间
+  # OCF 口径失真行业：这些行业的经营现金流里塞着客户存款 / 预售款（合同负债）等递延项，
+  # 不是可自由支配的现金流。用 ocf−capex 当永续 FCF 折现会系统性高估估值 ——
+  # 实证：滨江集团 OCF 102 亿 / 净利仅 18 亿 → FCF 达净利 6.3 倍，v_mid 给到市值 7.8 倍。
+  # 这些行业强制改用净利润口径（净利 × fcf_ni_ratio），并在 fcf_basis 标注 ni_forced。
+  fcf_ni_industries: ["银行", "房地产", "非银金融"]
+  fcf_ni_ratio: 0.8
   scenarios:
     bull:   {growth: 0.15, terminal: 0.04, discount: 0.09}
     base:   {growth: 0.08, terminal: 0.03, discount: 0.10}
